@@ -8,53 +8,82 @@
 #               any (custom formatted) job/classad data into time bins (default, 6 mins) and
 #               pushes these to the front-end (influxDB).
 
-import classad
+# TODO: if database doesn't exist, create it
+# TODO: limit the size of outbox
+# TODO: data retention
+
+#import classad
 import time
 import json
 import os
 
 
-PRINT_DEBUGS = True
+#PRINT_DEBUGS = True
 
 
 class Filenames:
+    """the filenames of all auxillary files"""
     CONFIG = "config"
     LAST_BIN_TIME = "last_bin_time"
     OUTBOX = "outbox"
     LOG = "log"
+    INIT_JOB_FIELDS = "initial_running_job_fields"
 
 
 class JobStatus:
-    """possible statuses of a condor job (at any time) and their integer codes"""
+    """possible statuses of a condor job (at any time) and their Condor integer codes"""
     IDLE, RUNNING, REMOVED, COMPLETED, HELD, TRANSFERRING_OUTPUT = range(1, 7)
 
 
 class ConfigFields:
     """labels of the fields in the configuration file"""
     BIN_DURATION = "bin duration"
+    OUTBOX_DATA_LIMIT = "outbox data limit"
 
+    METRICS = "metrics"
     class MetricsFields:
         """labels of the fields common to all metric types"""
+        DESCRIPTION = "description"
         DATABASE_NAME = "database name"
         MEASUREMENT_NAME = "measurement name"
+        GROUP_FIELDS = "group by ClassAd fields"
+
+        JOB_STATUS = "job status"
+        class JobStatuses:
+            """labels of the possible statuses of a job, which may be filtered out of a metric's gaze"""
+            IDLE = "IDLE"
+            RUNNING = "RUNNING"
+            REMOVED = "REMOVED"
+            COMPLETED = "COMPLETED"
+            HELD = "HELD"
+            TRANSFERRING_OUTPUT = "TRANSFERRING OUTPUT"
+
+            RAN_THEN_REMOVED = "RAN THEN REMOVED"
+            IDLE_THEN_REMOVED = "IDLE THEN REMOVED"
+
+        AGGREGATE_OP = "aggregation operation"
+        class AggregationOps:
+            """labels of the operations of aggregation"""
+            SUM = "SUM"
+            LAST = "LAST"
+            FIRST = "FIRST"
+            AVERAGE = "AVERAGE"
+
+        METRIC_TYPE = "metric type"
+        class MetricTypes:
+            """labels of the types a metric can be"""
+            RAW = "RAW"
+            COUNTER = "COUNTER"
+            DIFFERENCE = "DIFFERENCE"
+
+    class RawMetricFields:
         VALUE_CLASSAD_FIELD = "value ClassAd field"
-        AGGREGATION_FIELD = "aggregate by ClassAd field"
 
-    RAW_VALUE_METRICS = "raw value metrics"
-    class RawMetricsFields:
-        """labels of the fields specific to raw value metrics"""
+    class CounterMetricFields:
         pass
 
-    DIF_VALUE_METRICS = "difference value metrics"
-    class DifMetricsFields:
-        """labels of the fields specific to difference value metrics"""
-        pass
-
-    TAGS = "tags"
-    class TagFields:
-        """labels of the fields in the list of tags"""
-        NAME = "tag name"
-        CLASSAD_FIELD = "value ClassAd field"
+    class DifferenceMetricFields:
+        VALUE_CLASSAD_FIELD = "value ClassAd field"
 
 
 def get_last_bin_time():
@@ -94,7 +123,7 @@ def add_to_outbox(jobs):
     j = json.load(f)
     f.seek(0)
     f.truncate()
-    json.dump(j + jobs)
+    json.dump(j + jobs, f)
     f.close()
 
 
@@ -105,7 +134,38 @@ def add_to_log(message):
     f.close()
 
 
-def create_default
+# debug
+def spoof_config_metrics():
+    conf = {
+        ConfigFields.BIN_DURATION: 1,
+        ConfigFields.OUTBOX_DATA_LIMIT: 1000,
+        ConfigFields.METRICS: [
+            {
+                ConfigFields.MetricsFields.DATABASE_NAME: "RunningJobs",
+                ConfigFields.MetricsFields.MEASUREMENT_NAME: "num_jobs",
+                ConfigFields.MetricsFields.METRIC_TYPE: ConfigFields.MetricsFields.MetricTypes.COUNTER,
+                ConfigFields.MetricsFields.GROUP_FIELDS: ["Owner"],
+                ConfigFields.MetricsFields.AGGREGATE_OP: ConfigFields.MetricsFields.AggregationOps.LAST,
+                ConfigFields.MetricsFields.CONSTRAINT: "JobStatus =!= %d" % JobStatus.IDLE,
+                ConfigFields.MetricsFields.DESCRIPTION: ("The number of running jobs (by each owner) " +
+                                                         "at the end of each bin")
+            },
+
+            {
+                ConfigFields.MetricsFields.DATABASE_NAME: "RunningJobs",
+                ConfigFields.MetricsFields.MEASUREMENT_NAME: "cpu_time",
+                ConfigFields.MetricsFields.METRIC_TYPE: ConfigFields.MetricsFields.MetricTypes.DIFFERENCE,
+                ConfigFields.DifferenceMetricFields.VALUE_CLASSAD_FIELD: "RemoteUserCpu",
+                ConfigFields.MetricsFields.GROUP_FIELDS: ["Owner", "MATCH_EXP_JOB_Site"],
+                ConfigFields.MetricsFields.AGGREGATE_OP: ConfigFields.MetricsFields.AggregationOps.SUM,
+                ConfigFields.MetricsFields.DESCRIPTION: "The CPU time used by each owner on each job site per bin."
+            }
+        ]
+    }
+
+    f = open(Filenames.CONFIG, "w")
+    json.dump(conf, f, indent=4, sort_keys=False)
+    f.close()
 
 
 def check_and_fix_files():
@@ -154,7 +214,7 @@ def get_job_fields_running_since(t, fields):
     jobs = []
 
     # grab currently running jobs (which aren't idle)
-    const = "JobStatus =!= 1"
+    const = "JobStatus =!= 1"                                  # TODO: we may want idle
     fd = os.popen("condor_q -l -constraint '%s' " % const)
     ads = classad.parseOldAds(fd)
 
@@ -165,7 +225,7 @@ def get_job_fields_running_since(t, fields):
             jobs.append(job)
 
     # grab jobs which have ended since t, and weren't terminated when idle
-    const = "EnteredCurrentStatus > %d && LastJobStatus =!= 1" % t
+    const = "EnteredCurrentStatus > %d && LastJobStatus =!= 1" % t             # TODO: we may want idle
     fd = os.popen("condor_history -l -constraint '%s' " % const)
     ads = classad.parseOldAds(fd)
 
@@ -178,13 +238,40 @@ def get_job_fields_running_since(t, fields):
     return jobs
 
 
-check_and_fix_files()
-
+#check_and_fix_files()
 
 # TODO push outbox
 
 # TODO get server time. How should I do it?
 # maybe the Condor python bindings will make this more elegant?
 
-bin_duration = get_config()[ConfigFields.BIN_DURATION]
+
+config = get_config()
+bin_duration = config[ConfigFields.BIN_DURATION]
 initial_time = get_last_bin_time()
+current_time = int(time.time())                    # TODO: use server time instead
+
+
+
+
+# read the custom metrics from the config file
+metrics = config[ConfigFields.METRICS]
+for metric in metrics:
+    print metric
+
+
+
+
+# determine all required condor fields
+
+
+
+# get the required fields of all relevant jobs
+
+
+
+# decide on time bins
+
+
+
+# iterate bins and populate custom metrics
