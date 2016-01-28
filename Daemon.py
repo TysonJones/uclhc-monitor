@@ -12,22 +12,50 @@
 # TODO: limit the size of outbox
 # TODO: data retention
 
+import sys; sys.dont_write_bytecode = True
+
 #import classad
 import time
 import json
 import os
 
 
+
+
 #PRINT_DEBUGS = True
 
 
+class SpecialClassAds:
+    """
+    the condor labels of important job classad fields. These are needed by the
+    daemon even if not explicitly mentioned in the user defined custom metrics.
+    Jobs may not have all these fields, but they are attempted collection.
+    """
+    #TYPE = "MyType" # = "Job"
+    JOB_ID = "GlobalJobId"
+    JOB_START_DATE = "JobStartDate"
+    JOB_STATUS = "JobStatus"
+    LAST_JOB_STATUS = "LastJobStatus"
+    SERVER_TIME = "ServerTime"
+    ENTERED_STATUS_TIME = "EnteredCurrentStatus"
+
+    REQUIRED = [JOB_ID,
+                JOB_START_DATE,
+                JOB_STATUS,
+                LAST_JOB_STATUS,
+                SERVER_TIME,
+                ENTERED_STATUS_TIME]
+
+
+
 class Filenames:
-    """the filenames of all auxillary files"""
+    """the filenames of all auxillary files used by the main Daemon"""
     CONFIG = "config"
     LAST_BIN_TIME = "last_bin_time"
     OUTBOX = "outbox"
     LOG = "log"
     INIT_JOB_FIELDS = "initial_running_job_fields"
+    VALUE_CACHE = "classad_value_cache"
 
 
 class JobStatus:
@@ -35,55 +63,58 @@ class JobStatus:
     IDLE, RUNNING, REMOVED, COMPLETED, HELD, TRANSFERRING_OUTPUT = range(1, 7)
 
 
+
+# TODO: overhaul aggregation ops vs type. Some should be type specific?
 class ConfigFields:
     """labels of the fields in the configuration file"""
     BIN_DURATION = "bin duration"
     OUTBOX_DATA_LIMIT = "outbox data limit"
 
-    METRICS = "metrics"
-    class MetricsFields:
-        """labels of the fields common to all metric types"""
-        DESCRIPTION = "description"
-        DATABASE_NAME = "database name"
-        MEASUREMENT_NAME = "measurement name"
-        GROUP_FIELDS = "group by ClassAd fields"
+METRICS = "metrics"
+class MetricsFields:
+    """labels of the fields common to all metric types"""
+    DESCRIPTION = "description"
+    DATABASE_NAME = "database name"
+    MEASUREMENT_NAME = "measurement name"
+    GROUP_FIELDS = "group by ClassAd fields"
 
-        JOB_STATUS = "job status"
-        class JobStatuses:
-            """labels of the possible statuses of a job, which may be filtered out of a metric's gaze"""
-            IDLE = "IDLE"
-            RUNNING = "RUNNING"
-            REMOVED = "REMOVED"
-            COMPLETED = "COMPLETED"
-            HELD = "HELD"
-            TRANSFERRING_OUTPUT = "TRANSFERRING OUTPUT"
+    JOB_STATUS = "job status"
+    class JobStatuses:
+        """labels of the possible statuses of a job, which may be filtered out of a metric's gaze"""
+        IDLE = "IDLE"
+        RUNNING = "RUNNING"
+        REMOVED = "REMOVED"
+        COMPLETED = "COMPLETED"
+        HELD = "HELD"
+        TRANSFERRING_OUTPUT = "TRANSFERRING OUTPUT"
 
-            RAN_THEN_REMOVED = "RAN THEN REMOVED"
-            IDLE_THEN_REMOVED = "IDLE THEN REMOVED"
+        RAN_THEN_REMOVED = "RAN THEN REMOVED"
+        IDLE_THEN_REMOVED = "IDLE THEN REMOVED"
+        RUNNING_OR_RAN = "RUNNING OR RAN"
 
-        AGGREGATE_OP = "aggregation operation"
-        class AggregationOps:
-            """labels of the operations of aggregation"""
-            SUM = "SUM"
-            LAST = "LAST"
-            FIRST = "FIRST"
-            AVERAGE = "AVERAGE"
+    AGGREGATE_OP = "aggregation operation"
+    class AggregationOps:
+        """labels of the operations of aggregation"""
+        SUM = "SUM"
+        LAST = "LAST"
+        FIRST = "FIRST"
+        AVERAGE = "AVERAGE"
 
-        METRIC_TYPE = "metric type"
-        class MetricTypes:
-            """labels of the types a metric can be"""
-            RAW = "RAW"
-            COUNTER = "COUNTER"
-            DIFFERENCE = "DIFFERENCE"
+    METRIC_TYPE = "metric type"
+    class MetricTypes:
+        """labels of the types a metric can be"""
+        RAW = "RAW"
+        COUNTER = "COUNTER"
+        DIFFERENCE = "DIFFERENCE"
 
-    class RawMetricFields:
-        VALUE_CLASSAD_FIELD = "value ClassAd field"
+class RawMetricFields:
+    VALUE_CLASSAD_FIELD = "value ClassAd field"
 
-    class CounterMetricFields:
-        pass
+class CounterMetricFields:
+    pass
 
-    class DifferenceMetricFields:
-        VALUE_CLASSAD_FIELD = "value ClassAd field"
+class DifferenceMetricFields:
+    VALUE_CLASSAD_FIELD = "value ClassAd field"
 
 
 def get_last_bin_time():
@@ -139,26 +170,27 @@ def spoof_config_metrics():
     conf = {
         ConfigFields.BIN_DURATION: 1,
         ConfigFields.OUTBOX_DATA_LIMIT: 1000,
-        ConfigFields.METRICS: [
+        METRICS: [
             {
-                ConfigFields.MetricsFields.DATABASE_NAME: "RunningJobs",
-                ConfigFields.MetricsFields.MEASUREMENT_NAME: "num_jobs",
-                ConfigFields.MetricsFields.METRIC_TYPE: ConfigFields.MetricsFields.MetricTypes.COUNTER,
-                ConfigFields.MetricsFields.GROUP_FIELDS: ["Owner"],
-                ConfigFields.MetricsFields.AGGREGATE_OP: ConfigFields.MetricsFields.AggregationOps.LAST,
-                ConfigFields.MetricsFields.CONSTRAINT: "JobStatus =!= %d" % JobStatus.IDLE,
-                ConfigFields.MetricsFields.DESCRIPTION: ("The number of running jobs (by each owner) " +
+                MetricsFields.DATABASE_NAME: "RunningJobs",
+                MetricsFields.MEASUREMENT_NAME: "num_jobs",
+                MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
+                MetricsFields.GROUP_FIELDS: ["Owner"],
+                MetricsFields.AGGREGATE_OP: MetricsFields.AggregationOps.LAST,
+                MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
+                MetricsFields.DESCRIPTION: ("The number of running jobs (by each owner) " +
                                                          "at the end of each bin")
             },
 
             {
-                ConfigFields.MetricsFields.DATABASE_NAME: "RunningJobs",
-                ConfigFields.MetricsFields.MEASUREMENT_NAME: "cpu_time",
-                ConfigFields.MetricsFields.METRIC_TYPE: ConfigFields.MetricsFields.MetricTypes.DIFFERENCE,
-                ConfigFields.DifferenceMetricFields.VALUE_CLASSAD_FIELD: "RemoteUserCpu",
-                ConfigFields.MetricsFields.GROUP_FIELDS: ["Owner", "MATCH_EXP_JOB_Site"],
-                ConfigFields.MetricsFields.AGGREGATE_OP: ConfigFields.MetricsFields.AggregationOps.SUM,
-                ConfigFields.MetricsFields.DESCRIPTION: "The CPU time used by each owner on each job site per bin."
+                MetricsFields.DATABASE_NAME: "RunningJobs",
+                MetricsFields.MEASUREMENT_NAME: "cpu_time",
+                MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.DIFFERENCE,
+                DifferenceMetricFields.VALUE_CLASSAD_FIELD: "RemoteUserCpu",
+                MetricsFields.GROUP_FIELDS: ["Owner", "MATCH_EXP_JOB_Site"],
+                MetricsFields.AGGREGATE_OP: MetricsFields.AggregationOps.SUM,
+                MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
+                MetricsFields.DESCRIPTION: "The CPU time used by each owner on each job site per bin."
             }
         ]
     }
@@ -168,13 +200,34 @@ def spoof_config_metrics():
     f.close()
 
 
-def check_and_fix_files():
-
-    #TODO do this
-
-    pass
+def get_relevant_jobs_for_metrics(metrics):
 
 
+
+    # figure out what JobStatus we are after
+    for metric in metrics:
+        pass
+
+
+    # figure out what fields we want
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+'''
 def get_fields_from_ad(ad, fields):
     """
     returns a dict of field to the value in the passed ad, for all fields in field.
@@ -237,7 +290,11 @@ def get_job_fields_running_since(t, fields):
 
     return jobs
 
+'''
 
+
+
+'''
 #check_and_fix_files()
 
 # TODO push outbox
@@ -275,3 +332,4 @@ for metric in metrics:
 
 
 # iterate bins and populate custom metrics
+'''
