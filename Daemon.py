@@ -25,6 +25,16 @@ import os
 #PRINT_DEBUGS = True
 
 
+class CondorOperators:
+    """
+    list of operator symbols recognised by Condor for query constraints
+    """
+    OR          = "||"
+    AND         = "&&"
+    EQUALS      = "=?="
+    NOT_EQUALS  = "=!="
+
+
 class SpecialClassAds:
     """
     the condor labels of important job classad fields. These are needed by the
@@ -91,6 +101,7 @@ class MetricsFields:
         RAN_THEN_REMOVED = "RAN THEN REMOVED"
         IDLE_THEN_REMOVED = "IDLE THEN REMOVED"
         RUNNING_OR_RAN = "RUNNING OR RAN"
+
 
     AGGREGATE_OP = "aggregation operation"
     class AggregationOps:
@@ -204,18 +215,88 @@ def get_relevant_jobs_for_metrics(metrics):
 
 
 
-    # figure out what JobStatus we are after
+    "figure out what JobStatus we are after"
+    required_status = {
+        MetricsFields.JobStatuses.IDLE:         False,
+        MetricsFields.JobStatuses.RUNNING:      False,
+        MetricsFields.JobStatuses.REMOVED:      False,
+        MetricsFields.JobStatuses.COMPLETED:    False,
+        MetricsFields.JobStatuses.HELD:         False,
+        MetricsFields.JobStatuses.RAN_THEN_REMOVED:     False,
+        MetricsFields.JobStatuses.IDLE_THEN_REMOVED:    False,
+        MetricsFields.JobStatuses.RUNNING_OR_RAN:       False,
+        MetricsFields.JobStatuses.TRANSFERRING_OUTPUT:  False
+    }
     for metric in metrics:
-        pass
+        for status in metric[MetricsFields.JOB_STATUS]:
+            required_status[status] = True
+
+    "build condor query constraints"
+    # constraints which are to be OR'd
+    consts = []
+
+    # whether or not a call to each binary is required
+    condor_q, condor_history = False, False
+
+    # convenience variables
+    STATUS = SpecialClassAds.STATUS
+    LAST_STATUS = SpecialClassAds.LAST_JOB_STATUS
+    EQUALS = CondorOperators.EQUALS
+    NOT_EQUALS = CondorOperators.NOT_EQUALS
+    AND = CondorOperators.AND
+    OR = CondorOperators.OR
+
+    if required_status[MetricsFields.JobStatuses.IDLE]:
+        consts.append(STATUS + EQUALS + JobStatus.IDLE)
+        condor_q = True
+    if required_status[MetricsFields.JobStatuses.RUNNING]:
+        consts.append(STATUS + EQUALS + JobStatus.RUNNING)
+        condor_q = True
+    if required_status[MetricsFields.JobStatuses.REMOVED]:
+        consts.append(STATUS + EQUALS + JobStatus.REMOVED)
+        condor_history = True
+    if required_status[MetricsFields.JobStatuses.COMPLETED]:
+        consts.append(STATUS + EQUALS + JobStatus.COMPLETED)
+        condor_history = True
+    if required_status[MetricsFields.JobStatuses.HELD]:
+        consts.append(STATUS + EQUALS + JobStatus.HELD)
+        condor_q = True
+    if required_status[MetricsFields.JobStatuses.TRANSFERRING_OUTPUT]:
+        consts.append(STATUS + EQUALS + JobStatus.TRANSFERRING_OUTPUT)
+        condor_q = True
+    if required_status[MetricsFields.JobStatuses.RAN_THEN_REMOVED]:
+        consts.append(
+                 STATUS + EQUALS + JobStatus.REMOVED + AND +
+                 LAST_STATUS + EQUALS + JobStatus.RUNNING)
+        condor_history = True
+    if required_status[MetricsFields.JobStatuses.IDLE_THEN_REMOVED]:
+        consts.append(
+                STATUS + EQUALS + JobStatus.REMOVED + AND +
+                LAST_STATUS + EQUALS + JobStatus.IDLE)
+        condor_history = True
+    if required_status[MetricsFields.JobStatuses.RUNNING_OR_RAN]:
+        consts.append(
+                STATUS + EQUALS + JobStatus.RUNNING + OR +
+                STATUS + EQUALS + JobStatus.COMPLETED + OR +
+                '(' + STATUS + EQUALS + JobStatus.REMOVED + AND +
+                 LAST_STATUS + EQUALS + JobStatus.RUNNING + ')')
+        condor_q = True
+        condor_history = True
+
+    # merge the individual constraints into a big OR statement
+    constraint = 'true'
+    if len(consts) > 0:
+        constraint = '(' + (')' + OR + '(').join(consts)
+
+    print constraint
 
 
-    # figure out what fields we want
 
 
-
-
-
-
+config = get_config()
+bin_duration = config[ConfigFields.BIN_DURATION]
+metrics      = config[ConfigFields.METRICS]
+get_relevant_jobs_for_metrics(metrics)
 
 
 
