@@ -14,7 +14,7 @@
 
 import sys; sys.dont_write_bytecode = True
 
-#import classad
+import classad
 import time
 import json
 import os
@@ -63,12 +63,12 @@ class SpecialClassAds:
 
 class Filenames:
     """the filenames of all auxillary files used by the main Daemon"""
-    CONFIG = "config"
+    CONFIG = "config.json"
     LAST_BIN_TIME = "last_bin_time"
-    OUTBOX = "outbox"
-    LOG = "log"
-    INIT_JOB_FIELDS = "initial_running_job_fields"
-    VALUE_CACHE = "classad_value_cache"
+    OUTBOX = "outbox.json"
+    LOG = "log.json"
+    INIT_JOB_FIELDS = "initial_running_job_fields.json"
+    VALUE_CACHE = "classad_value_cache.json"
 
 
 class JobStatus:
