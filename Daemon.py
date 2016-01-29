@@ -20,9 +20,11 @@ import json
 import os
 
 
-
-
-#PRINT_DEBUGS = True
+PRINT_DEBUGS = True
+def DEBUG_PRINT(msg, obj=''):
+    """prints a debug message and object, only if the debug print flag is true"""
+    if PRINT_DEBUGS:
+        print(msg, obj)
 
 
 class CondorOperators:
@@ -33,6 +35,8 @@ class CondorOperators:
     AND         = "&&"
     EQUALS      = "=?="
     NOT_EQUALS  = "=!="
+    LESS_THAN   = "<"
+    GREATER_THAN= ">"
 
 
 class SpecialClassAds:
@@ -49,13 +53,12 @@ class SpecialClassAds:
     SERVER_TIME = "ServerTime"
     ENTERED_STATUS_TIME = "EnteredCurrentStatus"
 
-    REQUIRED = [JOB_ID,
+    REQUIRED = {JOB_ID,
                 JOB_START_DATE,
                 JOB_STATUS,
                 LAST_JOB_STATUS,
                 SERVER_TIME,
-                ENTERED_STATUS_TIME]
-
+                ENTERED_STATUS_TIME}
 
 
 class Filenames:
@@ -73,14 +76,13 @@ class JobStatus:
     IDLE, RUNNING, REMOVED, COMPLETED, HELD, TRANSFERRING_OUTPUT = range(1, 7)
 
 
-
 # TODO: overhaul aggregation ops vs type. Some should be type specific?
 class ConfigFields:
     """labels of the fields in the configuration file"""
     BIN_DURATION = "bin duration"
     OUTBOX_DATA_LIMIT = "outbox data limit"
+    METRICS = "metrics"
 
-METRICS = "metrics"
 class MetricsFields:
     """labels of the fields common to all metric types"""
     DESCRIPTION = "description"
@@ -181,7 +183,7 @@ def spoof_config_metrics():
     conf = {
         ConfigFields.BIN_DURATION: 1,
         ConfigFields.OUTBOX_DATA_LIMIT: 1000,
-        METRICS: [
+        ConfigFields.METRICS: [
             {
                 MetricsFields.DATABASE_NAME: "RunningJobs",
                 MetricsFields.MEASUREMENT_NAME: "num_jobs",
@@ -211,11 +213,68 @@ def spoof_config_metrics():
     f.close()
 
 
-def get_relevant_jobs_for_metrics(metrics):
+def get_running_condor_job_ads(constraint):
+    """
+    returns classads of all currently running jobs which satisfy the constraint
+
+    arguments:
+        constraint   --  a condor formatted constraint, restricting which jobs are returned by the condor binaries
+    """
+    cmd = "condor_q -l -const '%s' " % constraint
+
+    # debug
+    DEBUG_PRINT("Calling a Condor binary: ", cmd)
+
+    ads = classad.parseOldAds(os.popen(cmd))
+    return ads
 
 
+def get_old_condor_job_ads_since(constraint, since_time):
+    """
+    returns classads of all jobs in condor history which satisfy the constraint, AND entered their current state
+    since since_time
 
-    "figure out what JobStatus we are after"
+    arguments:
+        since_time   --  the time (seconds since epoch), after which to grab jobs satisfying the constraint
+        constraint   --  a condor formatted constraint, restricting which jobs are returned by the condor binaries
+    """
+    limit = SpecialClassAds.ENTERED_STATUS_TIME + ' ' + CondorOperators.GREATER_THAN + ' ' + str(since_time)
+    cmd = "condor_history -l -const '(%s %s %s)' " % (constraint, CondorOperators.AND, limit)
+
+    # debug
+    DEBUG_PRINT("Calling a Condor binary: ", cmd)
+
+    ads = classad.parseOldAds(os.popen(cmd))
+    return ads
+
+
+def get_stripped_classad(classad, fields):
+    """
+    returns a dict of only the classad fields in the passed list fields (with their classad values).
+    If a field in fields isn't in the classad, it is skipped. I.e. the returned structure does not necessarily
+    contain every field in fields, but it is gauranteed not to contain any field not in fields.
+    """
+    stripped = {}
+    for field in fields:
+        if field in classad:
+            stripped[field] = classad[field]
+    return stripped
+
+
+def get_relevant_jobs_for_metrics(metrics, since_time):
+    """
+    Collect all relevant job ClassAds from condor. A job is deemed relevant if
+    it is in a state (JobStatus) as required by a metric and if it entered its
+    current state since the given time. A ClassAd in a job is deemed relevant if
+    required by any metric (includes our list of required ads for every job).
+
+    arguments:
+        metrics    -- a list of metrics (in config file format)
+        since+time -- the earliest time (seconds since epoch) of job entering state
+    returns
+        [{},...]   -- a list of dicts, representing jobs, populated with required ads
+    """
+    "figure out what JobStatus and ClassAd fields we are after"
     required_status = {
         MetricsFields.JobStatuses.IDLE:         False,
         MetricsFields.JobStatuses.RUNNING:      False,
@@ -227,11 +286,17 @@ def get_relevant_jobs_for_metrics(metrics):
         MetricsFields.JobStatuses.RUNNING_OR_RAN:       False,
         MetricsFields.JobStatuses.TRANSFERRING_OUTPUT:  False
     }
+    required_fields = set().union(SpecialClassAds.REQUIRED)
     for metric in metrics:
+        # mark that a JobStatus is needed
         for status in metric[MetricsFields.JOB_STATUS]:
             required_status[status] = True
 
-    "build condor query constraints"
+        # mark that a ClassAd field is needed
+        for field in metric[MetricsFields.GROUP_FIELDS]:
+            required_fields.add(field)
+
+    "build condor query JobStatus constraints"
     # constraints which are to be OR'd
     consts = []
 
@@ -239,64 +304,83 @@ def get_relevant_jobs_for_metrics(metrics):
     condor_q, condor_history = False, False
 
     # convenience variables
-    STATUS = SpecialClassAds.STATUS
+    STATUS = SpecialClassAds.JOB_STATUS
     LAST_STATUS = SpecialClassAds.LAST_JOB_STATUS
-    EQUALS = CondorOperators.EQUALS
-    NOT_EQUALS = CondorOperators.NOT_EQUALS
-    AND = CondorOperators.AND
-    OR = CondorOperators.OR
+    EQUALS = ' ' + CondorOperators.EQUALS + ' '
+    AND = ' ' + CondorOperators.AND + ' '
+    OR = ' ' + CondorOperators.OR + ' '
 
+    # build constraint constituents based on required statuses (some are compound)
     if required_status[MetricsFields.JobStatuses.IDLE]:
-        consts.append(STATUS + EQUALS + JobStatus.IDLE)
+        consts.append(STATUS + EQUALS + str(JobStatus.IDLE))
         condor_q = True
     if required_status[MetricsFields.JobStatuses.RUNNING]:
-        consts.append(STATUS + EQUALS + JobStatus.RUNNING)
+        consts.append(STATUS + EQUALS + str(JobStatus.RUNNING))
         condor_q = True
     if required_status[MetricsFields.JobStatuses.REMOVED]:
-        consts.append(STATUS + EQUALS + JobStatus.REMOVED)
+        consts.append(STATUS + EQUALS + str(JobStatus.REMOVED))
         condor_history = True
     if required_status[MetricsFields.JobStatuses.COMPLETED]:
-        consts.append(STATUS + EQUALS + JobStatus.COMPLETED)
+        consts.append(STATUS + EQUALS + str(JobStatus.COMPLETED))
         condor_history = True
     if required_status[MetricsFields.JobStatuses.HELD]:
-        consts.append(STATUS + EQUALS + JobStatus.HELD)
+        consts.append(STATUS + EQUALS + str(JobStatus.HELD))
         condor_q = True
     if required_status[MetricsFields.JobStatuses.TRANSFERRING_OUTPUT]:
-        consts.append(STATUS + EQUALS + JobStatus.TRANSFERRING_OUTPUT)
+        consts.append(STATUS + EQUALS + str(JobStatus.TRANSFERRING_OUTPUT))
         condor_q = True
     if required_status[MetricsFields.JobStatuses.RAN_THEN_REMOVED]:
         consts.append(
-                 STATUS + EQUALS + JobStatus.REMOVED + AND +
-                 LAST_STATUS + EQUALS + JobStatus.RUNNING)
+                 STATUS + EQUALS + str(JobStatus.REMOVED) + AND +
+                 LAST_STATUS + EQUALS + str(JobStatus.RUNNING))
         condor_history = True
     if required_status[MetricsFields.JobStatuses.IDLE_THEN_REMOVED]:
         consts.append(
-                STATUS + EQUALS + JobStatus.REMOVED + AND +
-                LAST_STATUS + EQUALS + JobStatus.IDLE)
+                STATUS + EQUALS + str(JobStatus.REMOVED) + AND +
+                LAST_STATUS + EQUALS + str(JobStatus.IDLE))
         condor_history = True
     if required_status[MetricsFields.JobStatuses.RUNNING_OR_RAN]:
         consts.append(
-                STATUS + EQUALS + JobStatus.RUNNING + OR +
-                STATUS + EQUALS + JobStatus.COMPLETED + OR +
-                '(' + STATUS + EQUALS + JobStatus.REMOVED + AND +
-                 LAST_STATUS + EQUALS + JobStatus.RUNNING + ')')
+                STATUS + EQUALS + str(JobStatus.RUNNING) + OR +
+                STATUS + EQUALS + str(JobStatus.COMPLETED) + OR +
+                '(' + STATUS + EQUALS + str(JobStatus.REMOVED) + AND +
+                 LAST_STATUS + EQUALS + str(JobStatus.RUNNING) + ')')
         condor_q = True
         condor_history = True
 
     # merge the individual constraints into a big OR statement
     constraint = 'true'
     if len(consts) > 0:
-        constraint = '(' + (')' + OR + '(').join(consts)
+        constraint = '(' + (')' + OR + '(').join(consts) + ')'
 
-    print constraint
+    "collect the relevant jobs and fields from condor_q"
+    # jobs are formatted as dicts of required_fields to their condor values
+    jobs = []
+    if condor_q:
+        ads = get_running_condor_job_ads(constraint)
+        for ad in ads:
+            jobs.append(get_stripped_classad(ad, required_fields))
+
+    "collect the relevant jobs and fields from condor_history"
+    if condor_history:
+        ads = get_old_condor_job_ads_since(constraint, since_time)
+        for ad in ads:
+            jobs.append(get_stripped_classad(ad, required_fields))
+
+    return jobs
+
+
+spoof_config_metrics()
 
 
 
+last_bin_time= get_last_bin_time()
 
 config = get_config()
 bin_duration = config[ConfigFields.BIN_DURATION]
 metrics      = config[ConfigFields.METRICS]
-get_relevant_jobs_for_metrics(metrics)
+
+get_relevant_jobs_for_metrics(metrics, last_bin_time)
 
 
 

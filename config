@@ -1,1 +1,34 @@
-{"bin_duration":360}
+{
+    "metrics": [
+        {
+            "database name": "RunningJobs", 
+            "group by ClassAd fields": [
+                "Owner"
+            ], 
+            "metric type": "COUNTER", 
+            "measurement name": "num_jobs", 
+            "job status": [
+                "RUNNING OR RAN"
+            ], 
+            "aggregation operation": "LAST", 
+            "description": "The number of running jobs (by each owner) at the end of each bin"
+        }, 
+        {
+            "database name": "RunningJobs", 
+            "job status": [
+                "RUNNING OR RAN"
+            ], 
+            "group by ClassAd fields": [
+                "Owner", 
+                "MATCH_EXP_JOB_Site"
+            ], 
+            "metric type": "DIFFERENCE", 
+            "description": "The CPU time used by each owner on each job site per bin.", 
+            "aggregation operation": "SUM", 
+            "measurement name": "cpu_time", 
+            "value ClassAd field": "RemoteUserCpu"
+        }
+    ], 
+    "bin duration": 1, 
+    "outbox data limit": 1000
+}
