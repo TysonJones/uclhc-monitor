@@ -21,6 +21,18 @@ import os
 
 
 PRINT_DEBUGS = True
+
+
+class Filenames:
+    """the filenames of all auxillary files used by the main Daemon"""
+    CONFIG = "config.json"
+    LAST_BIN_TIME = "last_bin_time"
+    OUTBOX = "outbox.json"
+    LOG = "log.json"
+    INIT_JOB_FIELDS = "initial_running_job_vals.json"
+    VALUE_CACHE = "prev_value_cache.json"
+
+
 def DEBUG_PRINT(msg, obj=''):
     """prints a debug message and object, only if the debug print flag is true"""
     if PRINT_DEBUGS:
@@ -53,22 +65,13 @@ class SpecialClassAds:
     SERVER_TIME = "ServerTime"
     ENTERED_STATUS_TIME = "EnteredCurrentStatus"
 
-    REQUIRED = {JOB_ID,
-                JOB_START_DATE,
-                JOB_STATUS,
-                LAST_JOB_STATUS,
-                SERVER_TIME,
-                ENTERED_STATUS_TIME}
-
-
-class Filenames:
-    """the filenames of all auxillary files used by the main Daemon"""
-    CONFIG = "config.json"
-    LAST_BIN_TIME = "last_bin_time"
-    OUTBOX = "outbox.json"
-    LOG = "log.json"
-    INIT_JOB_FIELDS = "initial_running_job_fields.json"
-    VALUE_CACHE = "classad_value_cache.json"
+    #the fields which are (attemptedly) kept for every job, despite those specifically needed by metrics
+    REQUIRED = set([JOB_ID,
+                    JOB_START_DATE,
+                    JOB_STATUS,
+                    LAST_JOB_STATUS,
+                    SERVER_TIME,
+                    ENTERED_STATUS_TIME])
 
 
 class JobStatus:
@@ -82,6 +85,7 @@ class ConfigFields:
     BIN_DURATION = "bin duration"
     OUTBOX_DATA_LIMIT = "outbox data limit"
     METRICS = "metrics"
+
 
 class MetricsFields:
     """labels of the fields common to all metric types"""
@@ -130,7 +134,7 @@ class DifferenceMetricFields:
     VALUE_CLASSAD_FIELD = "value ClassAd field"
 
 
-def get_last_bin_time():
+def load_last_bin_time():
     """returns the time (seconds since epoch) of the end of the final bin in the previous push."""
     f = open(Filenames.LAST_BIN_TIME, 'r')
     t = f.read()
@@ -145,20 +149,41 @@ def write_last_bin_time(t):
     f.close()
 
 
-def get_config():
+def load_prev_val_cache():
+    """
+    loads the cache containing previous job Classad values
+
+    returns:
+        {}  -  the cache of values:{GlobalJobId: {field: [val, time], ...}, ... }
+    """
+    f = open(Filenames.VALUE_CACHE, 'r')
+    j = json.load(f)
+    f.close()
+    return j
+
+
+def load_job_init_vals():
+    """returns a dictionary of the initial values of job classad fields set when a job first runs"""
+    f = open(Filenames.INIT_JOB_FIELDS, 'r')
+    j = json.load(f)
+    f.close()
+    return j
+
+
+def load_config():
     """returns a dict of config settings."""
     f = open(Filenames.CONFIG, 'r')
-    d = json.load(f)
+    j = json.load(f)
     f.close()
-    return d
+    return j
 
 
-def get_outbox():
+def load_outbox():
     """returns the contents of the outbox."""
     f = open(Filenames.OUTBOX, 'r')
-    d = json.load(f)
+    j = json.load(f)
     f.close()
-    return d
+    return j
 
 
 def add_to_outbox(jobs):
@@ -184,26 +209,35 @@ def spoof_config_metrics():
         ConfigFields.BIN_DURATION: 1,
         ConfigFields.OUTBOX_DATA_LIMIT: 1000,
         ConfigFields.METRICS: [
+            # {
+            #     MetricsFields.DATABASE_NAME: "RunningJobs",
+            #     MetricsFields.MEASUREMENT_NAME: "num_jobs",
+            #     MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
+            #     MetricsFields.GROUP_FIELDS: ["Owner"],
+            #     MetricsFields.AGGREGATE_OP: MetricsFields.AggregationOps.LAST,
+            #     MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
+            #     MetricsFields.DESCRIPTION: ("The number of running jobs (by each owner) " +
+            #                                              "at the end of each bin")
+            # },
+            #
+            # {
+            #     MetricsFields.DATABASE_NAME: "RunningJobs",
+            #     MetricsFields.MEASUREMENT_NAME: "cpu_time",
+            #     MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.DIFFERENCE,
+            #     DifferenceMetricFields.VALUE_CLASSAD_FIELD: "RemoteUserCpu",
+            #     MetricsFields.GROUP_FIELDS: ["Owner", "MATCH_EXP_JOB_Site"],
+            #     MetricsFields.AGGREGATE_OP: MetricsFields.AggregationOps.SUM,
+            #     MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
+            #     MetricsFields.DESCRIPTION: "The CPU time used by each owner on each job site per bin."
+            # }
             {
-                MetricsFields.DATABASE_NAME: "RunningJobs",
-                MetricsFields.MEASUREMENT_NAME: "num_jobs",
+                MetricsFields.DATABASE_NAME: "MetricTest",
+                MetricsFields.MEASUREMENT_NAME: "num_idle",
                 MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
                 MetricsFields.GROUP_FIELDS: ["Owner"],
                 MetricsFields.AGGREGATE_OP: MetricsFields.AggregationOps.LAST,
-                MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
-                MetricsFields.DESCRIPTION: ("The number of running jobs (by each owner) " +
-                                                         "at the end of each bin")
-            },
-
-            {
-                MetricsFields.DATABASE_NAME: "RunningJobs",
-                MetricsFields.MEASUREMENT_NAME: "cpu_time",
-                MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.DIFFERENCE,
-                DifferenceMetricFields.VALUE_CLASSAD_FIELD: "RemoteUserCpu",
-                MetricsFields.GROUP_FIELDS: ["Owner", "MATCH_EXP_JOB_Site"],
-                MetricsFields.AGGREGATE_OP: MetricsFields.AggregationOps.SUM,
-                MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
-                MetricsFields.DESCRIPTION: "The CPU time used by each owner on each job site per bin."
+                MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.IDLE], #, MetricsFields.JobStatuses.IDLE_THEN_REMOVED],
+                MetricsFields.DESCRIPTION: "Number of idle jobs per user at the end of each time bin, which remain running now"
             }
         ]
     }
@@ -221,10 +255,7 @@ def get_running_condor_job_ads(constraint):
         constraint   --  a condor formatted constraint, restricting which jobs are returned by the condor binaries
     """
     cmd = "condor_q -l -const '%s' " % constraint
-
-    # debug
     DEBUG_PRINT("Calling a Condor binary: ", cmd)
-
     ads = classad.parseOldAds(os.popen(cmd))
     return ads
 
@@ -240,10 +271,7 @@ def get_old_condor_job_ads_since(constraint, since_time):
     """
     limit = SpecialClassAds.ENTERED_STATUS_TIME + ' ' + CondorOperators.GREATER_THAN + ' ' + str(since_time)
     cmd = "condor_history -l -const '(%s %s %s)' " % (constraint, CondorOperators.AND, limit)
-
-    # debug
     DEBUG_PRINT("Calling a Condor binary: ", cmd)
-
     ads = classad.parseOldAds(os.popen(cmd))
     return ads
 
@@ -256,14 +284,16 @@ def get_stripped_classad(classad, fields):
     """
     stripped = {}
     for field in fields:
+        # for some reason, some classad fields are strings and hate unicode
+        field = str(field)
         if field in classad:
             stripped[field] = classad[field]
     return stripped
 
 
-def get_relevant_jobs_for_metrics(metrics, since_time):
+def get_relevant_jobs_and_fields_for_metrics(metrics, since_time):
     """
-    Collect all relevant job ClassAds from condor. A job is deemed relevant if
+    Collect only relevant job ClassAds from condor. A job is deemed relevant if
     it is in a state (JobStatus) as required by a metric and if it entered its
     current state since the given time. A ClassAd in a job is deemed relevant if
     required by any metric (includes our list of required ads for every job).
@@ -370,25 +400,91 @@ def get_relevant_jobs_for_metrics(metrics, since_time):
     return jobs
 
 
+def spoof_val_cache():
+    """for debug. Spoofs previous RemoteUserCPU value in cache"""
+    f = open(Filenames.VALUE_CACHE, 'w')
+    # {GlobalJobId: { classad field: [val, timestamp], ...}, ... }
+    j = {
+        "uclhctest.t2.ucsd.edu#265.49#1452298787": {
+            "RemoteUserCpu": [89568.0, 1454011005]
+        }
+    }
+    json.dump(j, f)
+    f.close()
 
 
+def get_val_and_time_from_cache(field, jobID):
+    """
+    get a [val, time] for a particular classAd field from a job in cache
+    If the cache is not yet loaded, loads the cache without issue.
+    If the job isn't in the cache or doesn't have the field, returns False
+
+    returns
+        [value, time]   --  previously cached field value of job and its time
+        False           --  job or field aren't cached
+    """
 
 
+    if (jobID not in value_cache) or (field not in value_cache[jobID]):
+        return False
+
+    TODO DO DIS
+
+
+def add_val_to_val_cache(field, value, time, jobID):
+    """
+    adds a [val, time] to the cache under jobID: field. Loads cache if not.
+    Appends to existing jobs in cache. Overwrites existing same field.
+
+    arguments:
+        field  --  the ClassAd field name corresponding to the value
+        value  --  the value of the ClassAd field to store
+        time   --  the time at which the value applies
+        jobID  --  the global ID of the job to which this value applies
+    """
+    if jobID not in value_cache:
+        value_cache[jobID] = {field: [value, time]}
+    else:
+        value_cache[jobID][field] = [value, time]
+
+
+def get_val_change_over_bin(ad, field, t0, t1):
+    """
+    interpolates the change in a job's ClassAd field's value over the time bin t0 to t1.
+    The job run time can be misaligned from the time bin (zero returned for disjoint).
+    Uses the value_cache: if not present in cache, adds and assumes default value
+    as specified in the initial_running_jobs_fields.
+
+    arguments:
+        ad    --  the classad of the job
+        field --  the classad field of which to measure the change in [t0,t1]
+        t0    --  the initial time (seconds since epoch) of the time bin
+        t1    --  the final time (seconds since epoch) of the time bin
+    """
+    jobID = ad[SpecialClassAds.JOB_ID]
+    oldval = get_val_and_time_from_cache(field, jobID)
+    if not oldval:
+        TODO ACTUALLY DO DIS
+
+
+# spoofing
 spoof_config_metrics()
+spoof_val_cache()
 
+# load files
+last_bin_time = load_last_bin_time()
+value_cache   = load_prev_val_cache()
+job_init_vals = load_job_init_vals()
+config        = load_config()
+bin_duration  = config[ConfigFields.BIN_DURATION]
+metrics       = config[ConfigFields.METRICS]
 
+# get needed fields of needed jobs
+jobs = get_relevant_jobs_and_fields_for_metrics(metrics, last_bin_time)
 
-last_bin_time= get_last_bin_time()
+print jobs
 
-config = get_config()
-bin_duration = config[ConfigFields.BIN_DURATION]
-metrics      = config[ConfigFields.METRICS]
-
-get_relevant_jobs_for_metrics(metrics, last_bin_time)
-
-
-
-
+print len(jobs)
 
 
 
