@@ -65,12 +65,14 @@ class SpecialClassAds:
     SERVER_TIME = "ServerTime"
     ENTERED_STATUS_TIME = "EnteredCurrentStatus"
 
+    #TODO: the Glide_In_Job_Site field must default to submit for local jobs
+
     #the fields which are (attemptedly) kept for every job, despite those specifically needed by metrics
     REQUIRED = set([JOB_ID,
                     JOB_START_DATE,
                     JOB_STATUS,
                     LAST_JOB_STATUS,
-                    SERVER_TIME,
+                    #SERVER_TIME,
                     ENTERED_STATUS_TIME])
 
 
@@ -281,7 +283,11 @@ def get_stripped_classad(classad, fields):
     returns a dict of only the classad fields in the passed list fields (with their classad values).
     If a field in fields isn't in the classad, it is skipped. I.e. the returned structure does not necessarily
     contain every field in fields, but it is gauranteed not to contain any field not in fields.
+    Also sets the current time of the script to be the classads server time, in ContextData
     """
+    if SpecialClassAds.SERVER_TIME in classad:
+        ContextData.current_time = classad[SpecialClassAds.SERVER_TIME]
+
     stripped = {}
     for field in fields:
         # for some reason, some classad fields are strings and hate unicode
@@ -413,24 +419,45 @@ def spoof_val_cache():
     f.close()
 
 
+class ContextData:
+    last_bin_time = False
+    value_cache   = False
+    job_init_vals = False
+    config        = False
+    bin_duration  = False
+    metrics       = False
+    current_time  = False   # may be overwritten by class stripper to ServerTime
+
+    @staticmethod
+    def load():
+        """Grabs the required contextual data from files (and some calculations)"""
+        # load files
+        last_bin_time = load_last_bin_time()
+        value_cache   = load_prev_val_cache()
+        job_init_vals = load_job_init_vals()
+        config        = load_config()
+        bin_duration  = config[ConfigFields.BIN_DURATION]
+        metrics       = config[ConfigFields.METRICS]
+        current_time  = int(time.time())  # may be overwritten by class stripper to ServerTime
+
+
+
+
 # spoofing
 spoof_config_metrics()
 spoof_val_cache()
 
-# load files
-last_bin_time = load_last_bin_time()
-value_cache   = load_prev_val_cache()
-job_init_vals = load_job_init_vals()
-config        = load_config()
-bin_duration  = config[ConfigFields.BIN_DURATION]
-metrics       = config[ConfigFields.METRICS]
+# get contextual values
+ContextData.load()
 
 # get needed fields of needed jobs
-jobs = get_relevant_jobs_and_fields_for_metrics(metrics, last_bin_time)
+jobs = get_relevant_jobs_and_fields_for_metrics(ContextData.metrics, ContextData.last_bin_time)
 
-print jobs
+# get the times of each bin (inclusive of both ends; start of first, end of final)
+bin_times = range(ContextData.last_bin_time, ContextData.current_time, ContextData.bin_duration)
 
-print len(jobs)
+
+
 
 
 '''
