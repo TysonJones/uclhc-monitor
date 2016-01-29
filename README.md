@@ -221,6 +221,9 @@ Custom metrics are specified in the `config` file in the `metrics` list as a **J
 |`IDLE_THEN_REMOVED`|Job was idle when it was removed via `condor_rm`.|
 |`RUNNING_OR_RAN`|The job is currently running, or was ever ran before completion or removal. Equivalent to `["RUNNING", "COMPLETED", "RAN_THEN_REMOVED"]`
 
+>**Note**:
+
+>  When getting information about idle jobs, only jobs that are currently idle (`IDLE`) or were removed whilst idle (`IDLE_THEN_REMOVED`) can be used in metrics. When a job leaves its idle state (without being removed. I.e. it ran), time information about its idleness is lost. Thus metrics reporting idle job information require the Daemon to run frequently (to catch currently idle jobs) to be reliable.
 
 
 --------------------------------------------
@@ -264,7 +267,7 @@ Uses the database `Dormant` with a measurement called `idle_jobs` which gives th
     "metric type":             "COUNTER",
     "aggregation operation":   "SUM",
     "group by ClassAd fields": ["Owner"],
-    "job status":              ["RUNNING", "COMPLETED", "RAN_THEN_REMOVED"],
+    "job status":              ["IDLE"],
     "description":             "The CPU time used by each owner on each job site per bin"
 }
 ```

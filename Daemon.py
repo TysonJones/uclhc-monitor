@@ -24,7 +24,7 @@ PRINT_DEBUGS = True
 def DEBUG_PRINT(msg, obj=''):
     """prints a debug message and object, only if the debug print flag is true"""
     if PRINT_DEBUGS:
-        print(msg, obj)
+        print msg, obj
 
 
 class CondorOperators:
@@ -368,6 +368,10 @@ def get_relevant_jobs_for_metrics(metrics, since_time):
             jobs.append(get_stripped_classad(ad, required_fields))
 
     return jobs
+
+
+
+
 
 
 spoof_config_metrics()
