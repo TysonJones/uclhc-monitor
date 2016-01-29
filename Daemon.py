@@ -413,6 +413,27 @@ def spoof_val_cache():
     f.close()
 
 
+# spoofing
+spoof_config_metrics()
+spoof_val_cache()
+
+# load files
+last_bin_time = load_last_bin_time()
+value_cache   = load_prev_val_cache()
+job_init_vals = load_job_init_vals()
+config        = load_config()
+bin_duration  = config[ConfigFields.BIN_DURATION]
+metrics       = config[ConfigFields.METRICS]
+
+# get needed fields of needed jobs
+jobs = get_relevant_jobs_and_fields_for_metrics(metrics, last_bin_time)
+
+print jobs
+
+print len(jobs)
+
+
+'''
 def get_val_and_time_from_cache(field, jobID):
     """
     get a [val, time] for a particular classAd field from a job in cache
@@ -465,136 +486,8 @@ def get_val_change_over_bin(ad, field, t0, t1):
     oldval = get_val_and_time_from_cache(field, jobID)
     if not oldval:
         TODO ACTUALLY DO DIS
-
-
-# spoofing
-spoof_config_metrics()
-spoof_val_cache()
-
-# load files
-last_bin_time = load_last_bin_time()
-value_cache   = load_prev_val_cache()
-job_init_vals = load_job_init_vals()
-config        = load_config()
-bin_duration  = config[ConfigFields.BIN_DURATION]
-metrics       = config[ConfigFields.METRICS]
-
-# get needed fields of needed jobs
-jobs = get_relevant_jobs_and_fields_for_metrics(metrics, last_bin_time)
-
-print jobs
-
-print len(jobs)
-
-
-
-
-
-
-
-'''
-def get_fields_from_ad(ad, fields):
-    """
-    returns a dict of field to the value in the passed ad, for all fields in field.
-    If a field is not in fields, false is returned and an error is logged.
-
-    arguments:
-        ad      -- the classad from which to extract the designated fields
-        fields  -- the fields to collect from the ad
-    returns:
-        {}      -- a dictionary of the selected fields from ad if all fields are in ad
-        False   -- if any field in fields is not in the ad. In this case, an error is logged.
-    """
-    job = {}
-    for field in fields:
-        if field not in ad:
-            add_to_log('Requested field "%s" not in ad:\n%s' % (field, str(ad)))
-            return False
-        job[field] = ad[field]
-    return job
-
-
-def get_job_fields_running_since(t, fields):
-    """
-    returns a list of classad fields for all jobs which have either started since t, stopped since t (or both)
-     or were running before t and have not yet t. Simply, it is all jobs which at any time, were running
-    between t and now. This is exactly all jobs which are either currently running or have finished since t.
-    Note idle jobs are not returned, nor are jobs which were terminated when idle (never ever ran).
-    Jobs which ran and then were terminated before completion are returned as if completed when terminated.
-    If a field in fields is not in any ad for a job since t, that particular job is dropped (and an error is logged)
-
-    arguments:
-        t       -- time in nanoseconds since epoch, after which jobs having run are sought
-        fields  -- list of classad fields to return for each job
-    returns:
-        [ {}, {}, ...]  -- an array of dictionaries of classad keys to their job values, specified in fields
-    """
-    jobs = []
-
-    # grab currently running jobs (which aren't idle)
-    const = "JobStatus =!= 1"                                  # TODO: we may want idle
-    fd = os.popen("condor_q -l -constraint '%s' " % const)
-    ads = classad.parseOldAds(fd)
-
-    # record required fields    (py 2.7 one liner: {f:ad[f] for f in fields})
-    for ad in ads:
-        job = get_fields_from_ad(ad, fields)
-        if job:
-            jobs.append(job)
-
-    # grab jobs which have ended since t, and weren't terminated when idle
-    const = "EnteredCurrentStatus > %d && LastJobStatus =!= 1" % t             # TODO: we may want idle
-    fd = os.popen("condor_history -l -constraint '%s' " % const)
-    ads = classad.parseOldAds(fd)
-
-    # record required fields
-    for ad in ads:
-        job = get_fields_from_ad(ad, fields)
-        if job:
-            jobs.append(job)
-
-    return jobs
-
 '''
 
 
 
-'''
-#check_and_fix_files()
 
-# TODO push outbox
-
-# TODO get server time. How should I do it?
-# maybe the Condor python bindings will make this more elegant?
-
-
-config = get_config()
-bin_duration = config[ConfigFields.BIN_DURATION]
-initial_time = get_last_bin_time()
-current_time = int(time.time())                    # TODO: use server time instead
-
-
-
-
-# read the custom metrics from the config file
-metrics = config[ConfigFields.METRICS]
-for metric in metrics:
-    print metric
-
-
-
-
-# determine all required condor fields
-
-
-
-# get the required fields of all relevant jobs
-
-
-
-# decide on time bins
-
-
-
-# iterate bins and populate custom metrics
-'''
