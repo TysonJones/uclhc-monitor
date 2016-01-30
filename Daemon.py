@@ -14,7 +14,7 @@
 
 import sys; sys.dont_write_bytecode = True
 
-import classad
+#import classad
 import time
 import json
 import os
@@ -64,6 +64,7 @@ class SpecialClassAds:
     LAST_JOB_STATUS = "LastJobStatus"
     SERVER_TIME = "ServerTime"
     ENTERED_STATUS_TIME = "EnteredCurrentStatus"
+    ENQUEUE_TIME = "QDate"
 
     #TODO: the Glide_In_Job_Site field must default to submit for local jobs
 
@@ -72,13 +73,17 @@ class SpecialClassAds:
                     JOB_START_DATE,
                     JOB_STATUS,
                     LAST_JOB_STATUS,
-                    #SERVER_TIME,
-                    ENTERED_STATUS_TIME])
+                    SERVER_TIME,
+                    ENTERED_STATUS_TIME,
+                    ENQUEUE_TIME])
 
 
 class JobStatus:
     """possible statuses of a condor job (at any time) and their Condor integer codes"""
     IDLE, RUNNING, REMOVED, COMPLETED, HELD, TRANSFERRING_OUTPUT = range(1, 7)
+
+    ONGOING = [IDLE, RUNNING, HELD, TRANSFERRING_OUTPUT]
+    DONE    = [REMOVED, COMPLETED]
 
 
 # TODO: overhaul aggregation ops vs type. Some should be type specific?
@@ -238,7 +243,9 @@ def spoof_config_metrics():
                 MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
                 MetricsFields.GROUP_FIELDS: ["Owner"],
                 MetricsFields.AGGREGATE_OP: MetricsFields.AggregationOps.LAST,
-                MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.IDLE], #, MetricsFields.JobStatuses.IDLE_THEN_REMOVED],
+                MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.HELD,
+                                           MetricsFields.JobStatuses.IDLE_THEN_REMOVED,
+                                           MetricsFields.JobStatuses.RUNNING_OR_RAN],
                 MetricsFields.DESCRIPTION: "Number of idle jobs per user at the end of each time bin, which remain running now"
             }
         ]
@@ -252,7 +259,7 @@ def spoof_config_metrics():
 def get_running_condor_job_ads(constraint):
     """
     returns classads of all currently running jobs which satisfy the constraint
-
+s
     arguments:
         constraint   --  a condor formatted constraint, restricting which jobs are returned by the condor binaries
     """
@@ -419,27 +426,125 @@ def spoof_val_cache():
     f.close()
 
 
-class ContextData:
-    last_bin_time = False
-    value_cache   = False
-    job_init_vals = False
-    config        = False
-    bin_duration  = False
-    metrics       = False
-    current_time  = False   # may be overwritten by class stripper to ServerTime
+def get_prev_value_from_cache(jobID, field, init_time, context):
+    """
+    get the last known value (and time thereof) of the passed field of the job
+    with JobID from the previous value cache. If not in the cache, assumes
+    the fields usual initial value (as stored in the initial job values file)
+    and adds it, for the passed init_time (initial time of the job) to the cache,
+    then returns that.
+    Note that if the previous val must be assumed as initial but the field's
+    initial value is not saved in the initial value file, an error will cause
+    the Daemon to quit.
 
-    @staticmethod
-    def load():
+    arguments:
+        jobID  --  the global ID of the job for which to find prev val of field
+        field  --  the condor field name for which to find the prev val of
+        init_time  --  the 'start' time of this job, only used if the job was
+                       not in the cache and so must be added there
+        context    --  the contextual data object, used for handles to
+                       the previous value cache.
+
+    returns:
+        [val, time] -- the previous value and its corresponding time of the job
+    """
+    # if val was cached, return it and its cache time
+    if (jobID in context.prev_value_cache) and (field in context.prev_value_cache[jobID]):
+        return context.prev_value_cache[jobID][field] # [val, time]
+
+    # otherwise, we must assume the previous val as initial at job start
+    # if it's not in the init value list, reporet error and exit
+    if field not in context.job_init_vals:
+        print ("ERROR! The difference in field %s was requested, which requires "+
+               "previous value caching. The requested field does NOT appear in "+
+               "the initial value cache (%s). Please add it and its initial value!"
+               ) % (field, Filenames.INIT_JOB_FIELDS)
+        exit()
+
+    # grab the default init value
+    init = context.job_init_vals[field]
+
+    # add it to the previous value cache
+    if jobID not in context.prev_value_cache:
+        context.prev_value_cache[jobID] = {}
+    context.prev_value_cache[jobID][field] = [init, init_time]
+
+    return [init, init_time]
+
+
+def get_change_in_val_over_bin(job, field, t0, t1, context):
+    """
+    calculates the change in a job field over/within the bin [t0, t1]. Does this by consulting
+    the previous value cache (possibly creating a new entry if the job is unfamiliar,
+    using default initial values)
+
+    arguments:
+        job    -- a stripped job structure which MUST contain field
+        field  -- the field in job for which to calculate the change in value of
+        t0     -- the start time of the bin (inclusive)
+        t1     -- the end time of the bin (inclusive)
+        context -- the contextual variables object (for cache handles)
+
+    returns
+        float: the change in value of the field over the bin (or within)
+    """
+    # start and end of the jobs current state (end defaults to t1 if longer)
+    start, end = None, None
+
+    # active states start at EnteredCurrentStatus and 'end' at t1
+    if job[SpecialClassAds.JOB_STATUS] in JobStatus.ONGOING:
+        start = job[SpecialClassAds.ENTERED_STATUS_TIME]
+        end   = t1
+
+    # done states end at EnteredCurrentStatus
+    if job[SpecialClassAds.JOB_STATUS] in JobStatus.DONE:
+        end = job[SpecialClassAds.ENTERED_STATUS_TIME]
+
+        # jobs which died idle 'started' at their enqueue time
+        if job[SpecialClassAds.LAST_JOB_STATUS] == JobStatus.IDLE:
+            start = job[SpecialClassAds.ENQUEUE_TIME]
+        else:
+            start = job[SpecialClassAds.JOB_START_DATE]
+
+    # job is entirely outside bin
+    if (end <= t0) or (start >= t1):
+        return 0
+
+    # the time for which the job runs within the bin
+    time_in_bin = min(end, t1) - max(t0, start)
+
+    # the prev val of the field and that time the job had it
+    prev_val, prev_time = get_prev_value_from_cache(job[SpecialClassAds.JOB_ID], field, start, context)
+
+    # change in val per unit time, incurred since prev
+    val_change_rate = (job[field] - prev_val)/float(end - prev_time)
+
+    # change in val over bin
+    val_change_in_bin = time_in_bin * val_change_rate
+    return val_change_in_bin
+
+    #TODO: cache the results! No floating maths
+
+
+
+class ContextData:
+    def __init__(self):
         """Grabs the required contextual data from files (and some calculations)"""
         # load files
-        last_bin_time = load_last_bin_time()
-        value_cache   = load_prev_val_cache()
-        job_init_vals = load_job_init_vals()
-        config        = load_config()
-        bin_duration  = config[ConfigFields.BIN_DURATION]
-        metrics       = config[ConfigFields.METRICS]
-        current_time  = int(time.time())  # may be overwritten by class stripper to ServerTime
+        self.last_bin_time = load_last_bin_time()
+        self.prev_value_cache   = load_prev_val_cache()
+        self.job_init_vals = load_job_init_vals()
+        config             = load_config()
+        self.bin_duration  = config[ConfigFields.BIN_DURATION]
+        self.metrics       = config[ConfigFields.METRICS]
+        self.current_time  = int(time.time())  # may be overwritten by class stripper to ServerTime
 
+    def update_current_time_to_server_time(self, jobs):
+        """updates the current_time field to use the server time as reported by a job. Not gauranteed to change"""
+        for job in jobs:
+            if SpecialClassAds.SERVER_TIME in job:
+                self.current_time = job[SpecialClassAds.SERVER_TIME]
+                break
 
 
 
@@ -448,14 +553,41 @@ spoof_config_metrics()
 spoof_val_cache()
 
 # get contextual values
-ContextData.load()
+context = ContextData()
 
 # get needed fields of needed jobs
-jobs = get_relevant_jobs_and_fields_for_metrics(ContextData.metrics, ContextData.last_bin_time)
+jobs = get_relevant_jobs_and_fields_for_metrics(context.metrics, context.last_bin_time)
+context.update_current_time_to_server_time(jobs)
 
-# get the times of each bin (inclusive of both ends; start of first, end of final)
-bin_times = range(ContextData.last_bin_time, ContextData.current_time, ContextData.bin_duration)
+# get the times of each bin (inclusive of start, excludes end time of final bin)
+bin_times = range(context.last_bin_time, context.current_time, context.bin_duration)[:-1]
 
+for metric in context.metrics:
+
+    vals_at_bins = [] #     [ [separated by dif tags, ..], ...]
+
+    for bin_start in bin_times:
+
+        vals_for_bin = []    # [  {val: , group0: , group1:, ...}, ...]
+
+        for job in jobs:
+
+            if metric[MetricsFields.METRIC_TYPE] == MetricsFields.MetricTypes.DIFFERENCE:
+
+
+
+
+
+
+
+
+
+
+
+
+
+# TODO: write out prev_val_cache
+#
 
 
 

@@ -1,32 +1,19 @@
 {
     "metrics": [
         {
-            "database name": "RunningJobs", 
+            "database name": "MetricTest", 
             "group by ClassAd fields": [
                 "Owner"
             ], 
             "metric type": "COUNTER", 
-            "measurement name": "num_jobs", 
+            "measurement name": "num_idle", 
             "job status": [
+                "HELD", 
+                "IDLE THEN REMOVED", 
                 "RUNNING OR RAN"
             ], 
             "aggregation operation": "LAST", 
-            "description": "The number of running jobs (by each owner) at the end of each bin"
-        }, 
-        {
-            "database name": "RunningJobs", 
-            "job status": [
-                "RUNNING OR RAN"
-            ], 
-            "group by ClassAd fields": [
-                "Owner", 
-                "MATCH_EXP_JOB_Site"
-            ], 
-            "metric type": "DIFFERENCE", 
-            "description": "The CPU time used by each owner on each job site per bin.", 
-            "aggregation operation": "SUM", 
-            "measurement name": "cpu_time", 
-            "value ClassAd field": "RemoteUserCpu"
+            "description": "Number of idle jobs per user at the end of each time bin, which remain running now"
         }
     ], 
     "bin duration": 1, 
