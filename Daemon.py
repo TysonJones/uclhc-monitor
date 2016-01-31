@@ -33,6 +33,19 @@ class Filenames:
     VALUE_CACHE = "prev_value_cache.json"
 
 
+class Labels:
+    """the placeholder or defaulted strings to display to the user"""
+
+    # the placeholder for a metric group val to use as an influxDB tag, if a job didn't have a value
+    METRIC_GROUP_UNKNOWN_VALUE = "unknown"
+
+
+class CondorDudValues:
+    """the values of Condor fields when Condor reports them incorrectly"""
+
+    JOB_SITE_WHEN_ON_BRICK = ["Unknown", "$$(GLIDEIN_Site:Unknown)", "$$(JOB_Site:unknown)"]
+
+
 def DEBUG_PRINT(msg, obj=''):
     """prints a debug message and object, only if the debug print flag is true"""
     if PRINT_DEBUGS:
@@ -65,6 +78,8 @@ class SpecialClassAds:
     SERVER_TIME = "ServerTime"
     ENTERED_STATUS_TIME = "EnteredCurrentStatus"
     ENQUEUE_TIME = "QDate"
+    JOB_SITE = "MATCH_EXP_JOB_Site"
+    SUBMIT_SITE = "SUBMIT_SITE"
 
     #TODO: the Glide_In_Job_Site field must default to submit for local jobs
 
@@ -75,7 +90,9 @@ class SpecialClassAds:
                     LAST_JOB_STATUS,
                     SERVER_TIME,
                     ENTERED_STATUS_TIME,
-                    ENQUEUE_TIME])
+                    ENQUEUE_TIME,
+                    JOB_SITE,
+                    SUBMIT_SITE])
 
 
 class JobStatus:
@@ -101,7 +118,7 @@ class MetricsFields:
     MEASUREMENT_NAME = "measurement name"
     GROUP_FIELDS = "group by ClassAd fields"
 
-    JOB_STATUS = "job status"
+    JOB_STATUS = "job statuses"
     class JobStatuses:
         """labels of the possible statuses of a job, which may be filtered out of a metric's gaze"""
         IDLE = "IDLE"
@@ -115,15 +132,7 @@ class MetricsFields:
         IDLE_THEN_REMOVED = "IDLE THEN REMOVED"
         RUNNING_OR_RAN = "RUNNING OR RAN"
 
-
     AGGREGATE_OP = "aggregation operation"
-    class AggregationOps:
-        """labels of the operations of aggregation"""
-        SUM = "SUM"
-        LAST = "LAST"
-        FIRST = "FIRST"
-        AVERAGE = "AVERAGE"
-
     METRIC_TYPE = "metric type"
     class MetricTypes:
         """labels of the types a metric can be"""
@@ -134,11 +143,26 @@ class MetricsFields:
 class RawMetricFields:
     VALUE_CLASSAD_FIELD = "value ClassAd field"
 
-class CounterMetricFields:
-    pass
+    class AggregationOps:
+        SUM = "SUM"
+        AVERAGE = "AVERAGE"
+        WEIGHTED_AVERAGE = "WEIGHTED AVERAGE"
 
 class DifferenceMetricFields:
     VALUE_CLASSAD_FIELD = "value ClassAd field"
+
+    class AggregationOps:
+        SUM = "SUM"
+        AVERAGE = "AVERAGE"
+        WEIGHTED_AVERAGE = "WEIGHTED AVERAGE"
+
+class CounterMetricFields:
+
+    class AggregationOps:
+        ALL = "ALL"
+        INITIAL = "INITIAL"
+        FINAL = "FINAL"
+        WEIGHTED_AVERAGE = "WEIGHTED AVERAGE"
 
 
 def load_last_bin_time():
@@ -242,7 +266,7 @@ def spoof_config_metrics():
                 MetricsFields.MEASUREMENT_NAME: "num_idle",
                 MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
                 MetricsFields.GROUP_FIELDS: ["Owner"],
-                MetricsFields.AGGREGATE_OP: MetricsFields.AggregationOps.LAST,
+                MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.FINAL,
                 MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.HELD,
                                            MetricsFields.JobStatuses.IDLE_THEN_REMOVED,
                                            MetricsFields.JobStatuses.RUNNING_OR_RAN],
@@ -472,22 +496,22 @@ def get_prev_value_from_cache(jobID, field, init_time, context):
     return [init, init_time]
 
 
-def get_change_in_val_over_bin(job, field, t0, t1, context):
+def get_duration_of_job_within_bin(job, t0, t1):
     """
-    calculates the change in a job field over/within the bin [t0, t1]. Does this by consulting
-    the previous value cache (possibly creating a new entry if the job is unfamiliar,
-    using default initial values)
+    calculations the duration of a job (in some active state) within the bin from t0 to t1,
+    and returns also the start time of the job and its end time, defaulted to t1 if still running.
 
     arguments:
-        job    -- a stripped job structure which MUST contain field
-        field  -- the field in job for which to calculate the change in value of
-        t0     -- the start time of the bin (inclusive)
-        t1     -- the end time of the bin (inclusive)
-        context -- the contextual variables object (for cache handles)
+        job -- a tripped job structure
+        t0  -- the start time of the bin (inclusive), seconds since epoch
+        t1  -- the end time of the bin (inclusive), seconds since epoch
 
     returns
-        float: the change in value of the field over the bin (or within)
+        [int, int, int] -- the duration of the job within the bin. Minimum 0, maximum t1 - t0
+                        -- the start time of the job
+                        -- the end time of the job (t1 if still running)
     """
+
     # start and end of the jobs current state (end defaults to t1 if longer)
     start, end = None, None
 
@@ -513,6 +537,28 @@ def get_change_in_val_over_bin(job, field, t0, t1, context):
     # the time for which the job runs within the bin
     time_in_bin = min(end, t1) - max(t0, start)
 
+    return [time_in_bin, start, end]
+
+
+def get_change_in_val_over_bin(job, field, t0, t1, context):
+    """
+    calculates the change in a job field over/within the bin [t0, t1]. Does this by consulting
+    the previous value cache (possibly creating a new entry if the job is unfamiliar,
+    using default initial values). Returns also the duration of the job within the bin (<= t1-t0)
+
+    arguments:
+        job    -- a stripped job structure which MUST contain field
+        field  -- the field in job for which to calculate the change in value of
+        t0     -- the start time of the bin (inclusive), seconds since epoch
+        t1     -- the end time of the bin (inclusive), seconds since epoch
+        context -- the contextual variables object (for cache handles)
+
+    returns
+        [float, int] -- the change in value of the field over the bin (or within), and its duration in bin.
+                        The duration of the job is less than or equal to t1 - t0.
+    """
+    time_in_bin, start, end = get_duration_of_job_within_bin(job, t0, t1)
+
     # the prev val of the field and that time the job had it
     prev_val, prev_time = get_prev_value_from_cache(job[SpecialClassAds.JOB_ID], field, start, context)
 
@@ -521,10 +567,53 @@ def get_change_in_val_over_bin(job, field, t0, t1, context):
 
     # change in val over bin
     val_change_in_bin = time_in_bin * val_change_rate
-    return val_change_in_bin
+
+    return [val_change_in_bin, time_in_bin]
 
     #TODO: cache the results! No floating maths
 
+
+def is_job_status_in_metric_statuses(job_status, prev_job_status, metric_statuses):
+    """
+    determines whether a job of current and previous status should be included in a metric,
+    given the user declared list of job statuses for the metric
+
+    arguments:
+        job_status      --  the current status of the job (Condor ID: 1-7)
+        prev_job_status --  the job's previous status (Condor LastJobStatus. Condor ID 1-7)
+        metric_statuses --  a list of MetricFields.JobStatuses as declared in the metric
+
+    returns:
+        True or False
+    """
+    for req_stat in metric_statuses:
+        if (req_stat == MetricsFields.JobStatuses.IDLE) and (job_status == JobStatus.IDLE):
+            return True
+        if (req_stat == MetricsFields.JobStatuses.RUNNING) and (job_status == JobStatus.RUNNING):
+            return True
+        if (req_stat == MetricsFields.JobStatuses.REMOVED) and (job_status == JobStatus.REMOVED):
+            return True
+        if (req_stat == MetricsFields.JobStatuses.COMPLETED) and (job_status == JobStatus.COMPLETED):
+            return True
+        if (req_stat == MetricsFields.JobStatuses.HELD) and (job_status == JobStatus.HELD):
+            return True
+        if (req_stat == MetricsFields.JobStatuses.TRANSFERRING_OUTPUT) and (job_status == JobStatus.TRANSFERRING_OUTPUT):
+            return True
+
+        if (req_stat == MetricsFields.JobStatuses.RAN_THEN_REMOVED) and (job_status == JobStatus.REMOVED):
+            if prev_job_status == JobStatus.RUNNING:
+                return True
+        if (req_stat == MetricsFields.JobStatuses.IDLE_THEN_REMOVED) and (job_status == JobStatus.REMOVED):
+            if prev_job_status == JobStatus.IDLE:
+                return True
+        if req_stat == MetricsFields.JobStatuses.RUNNING_OR_RAN:
+            if job_status == JobStatus.RUNNING:
+                return True
+            if job_status == JobStatus.COMPLETED:
+                return True
+            if (job_status == JobStatus.REMOVED) and (prev_job_status == JobStatus.RUNNING):
+                return True
+    return False
 
 
 class ContextData:
@@ -562,17 +651,152 @@ context.update_current_time_to_server_time(jobs)
 # get the times of each bin (inclusive of start, excludes end time of final bin)
 bin_times = range(context.last_bin_time, context.current_time, context.bin_duration)[:-1]
 
+
+
+"for each metric, work out its value(s) at every time bin"
+
 for metric in context.metrics:
 
     vals_at_bins = [] #     [ [separated by dif tags, ..], ...]
 
+    metric_type = metric[MetricsFields.METRIC_TYPE]
+    metric_op   = metric[MetricsFields.AGGREGATE_OP]
+
     for bin_start in bin_times:
 
-        vals_for_bin = []    # [  {val: , group0: , group1:, ...}, ...]
+
+        vals_for_bin = {}  #{groupscode: {'groups':{'Owner':'trjones', ...}, 'jobs': [jobs, ...]}, ..}
+                           #group code is string concat of group vals
+                           #each groupscode has a 'groups' dict and a 'jobs' list
+                           #each job is {'value': val, 'duration': dur}
+
+        "for each bin, look at every job"
+
 
         for job in jobs:
 
-            if metric[MetricsFields.METRIC_TYPE] == MetricsFields.MetricTypes.DIFFERENCE:
+            # skip the job if it doesn't satisfy the metrics status requirements
+            if not is_job_status_in_metric_statuses(
+                    job[SpecialClassAds.JOB_STATUS],
+                    job[SpecialClassAds.LAST_JOB_STATUS],
+                    metric[MetricsFields.JOB_STATUS]):
+                continue
+
+
+            "process different metric types; each must yield a value and duration variable"
+
+            value, duration = None, None
+
+            if metric_type == MetricsFields.MetricTypes.DIFFERENCE:
+
+                # condor field of the value we want to find the difference in
+                val_field = metric[DifferenceMetricFields.VALUE_CLASSAD_FIELD]
+
+                # skip the job if it doesn't contain the required (but not group) fields and report error
+                if val_field not in job:
+                    print "ERROR! The following job:\n#####"
+                    print job
+                    print ("#####\ndid not contain the field %s as required by the following metric:" %
+                            metric[DifferenceMetricFields.VALUE_CLASSAD_FIELD])
+                    print metric
+                    continue
+
+                # TODO: you might also skip with further constraints here
+
+                # get the change in the desired val
+                value, duration = get_change_in_val_over_bin(
+                        job, metric,
+                        bin_start, bin_start + context.bin_duration,
+                        context)
+
+            if metric_type == MetricsFields.MetricTypes.RAW:
+
+                # condor field of the value we want
+                val_field = metric[RawMetricFields.VALUE_CLASSAD_FIELD]
+
+                # skip the job if it doesn't contain the required (but not group) fields and report error
+                if val_field not in job:
+                    print "ERROR! The following job:\n#####"
+                    print job
+                    print ("#####\ndid not contain the field %s as required by the following metric:" %
+                            metric[DifferenceMetricFields.VALUE_CLASSAD_FIELD])
+                    print metric
+                    continue
+
+                value = job[val_field]
+                duration = get_duration_of_job_within_bin(job, bin_start, bin_start + context.bin_duration)[0]
+
+
+            if metric_type == MetricsFields.MetricTypes.COUNTER:
+
+                duration, start, end = get_duration_of_job_within_bin(job, bin_start, bin_start + context.bin_duration)
+                value = 1 if (duration > 0) else 0
+
+                # for the counter type, we might actually skip this job depending on op type
+                if metric_op == CounterMetricFields.AggregationOps.INITIAL:
+                    if start > bin_start:
+                        value = 0
+                        # TODO put `continue` here if you don't want 0 val on grafana graph
+                if metric_op == CounterMetricFields.AggregationOps.FINAL:
+                    if end < bin_start + context.bin_duration:
+                        value = 0
+
+
+            # associate the job value with the metric's specified grouping
+            job_val = {'value':value, 'duration':duration}
+            groups = {}
+            for group in metric[MetricsFields.GROUP_FIELDS]:
+                if group in job:
+                    groups[group] = job[group]
+                    # special case: when jobs run on the brick, their job site gets stuffed. repair
+                    if group == SpecialClassAds.JOB_SITE:
+                        if job[group] in CondorDudValues.JOB_SITE_WHEN_ON_BRICK:
+                            groups[group] = job[SpecialClassAds.SUBMIT_SITE]
+                else:
+                    groups[group] = Labels.METRIC_GROUP_UNKNOWN_VALUE
+            group_code = ','.join([str(groups[key]) for key in groups])
+
+            if group_code in vals_for_bin:
+                vals_for_bin[group_code]['jobs'].append(job_val)
+            else:
+                vals_for_bin[group_code] = {'jobs':[job_val], 'groups':groups}
+
+
+
+        "collate job data for this time bin"
+        # vals_for_bin =   {groupscode: {'groups':{'Owner':'trjones', ...}, 'jobs': [jobs, ...]}, ..}
+                           #group code is string concat of group vals
+                           #each groupscode has a 'groups' dict and a 'jobs' list
+                           #each job is {'value': val, 'duration': dur}
+
+        results_for_bin = {}   # {groupscode: {'groups':{...}, 'result': val}
+
+        # summing all jobs (or pre-organised subset, if COUNTER and FIRST | LAST) per group
+        if (metric_op == RawMetricFields.AggregationOps.SUM or
+            metric_op == DifferenceMetricFields.AggregationOps.SUM or
+            metric_op == CounterMetricFields.AggregationOps.ALL or
+            metric_op == CounterMetricFields.AggregationOps.INITIAL or
+            metric_op == CounterMetricFields.AggregationOps.FINAL):
+
+            for groups_code in vals_for_bin:
+                group_jobs   = vals_for_bin[groups_code]['jobs']
+                group_groups = vals_for_bin[groups_code]['groups']
+                result = sum([group_job['value'] for group_job in group_jobs])
+                results_for_bin[groups_code] = {'result': result, 'groups':group_groups}
+
+        if (metric_op == RawMetricFields.AggregationOps.WEIGHTED_AVERAGE or
+            metric_op == DifferenceMetricFields.AggregationOps.WEIGHTED_AVERAGE):
+
+            pass
+
+        if (metric_op == CounterMetricFields.AggregationOps.WEIGHTED_AVERAGE):
+            pass
+
+        if (metric_op == RawMetricFields.AggregationOps.AVERAGE or
+            metric_op == DifferenceMetricFields.AggregationOps.AVERAGE):
+            pass
+
+
 
 
 
@@ -590,62 +814,6 @@ for metric in context.metrics:
 #
 
 
-
-
-'''
-def get_val_and_time_from_cache(field, jobID):
-    """
-    get a [val, time] for a particular classAd field from a job in cache
-    If the cache is not yet loaded, loads the cache without issue.
-    If the job isn't in the cache or doesn't have the field, returns False
-
-    returns
-        [value, time]   --  previously cached field value of job and its time
-        False           --  job or field aren't cached
-    """
-
-
-    if (jobID not in value_cache) or (field not in value_cache[jobID]):
-        return False
-
-    TODO DO DIS
-
-
-def add_val_to_val_cache(field, value, time, jobID):
-    """
-    adds a [val, time] to the cache under jobID: field. Loads cache if not.
-    Appends to existing jobs in cache. Overwrites existing same field.
-
-    arguments:
-        field  --  the ClassAd field name corresponding to the value
-        value  --  the value of the ClassAd field to store
-        time   --  the time at which the value applies
-        jobID  --  the global ID of the job to which this value applies
-    """
-    if jobID not in value_cache:
-        value_cache[jobID] = {field: [value, time]}
-    else:
-        value_cache[jobID][field] = [value, time]
-
-
-def get_val_change_over_bin(ad, field, t0, t1):
-    """
-    interpolates the change in a job's ClassAd field's value over the time bin t0 to t1.
-    The job run time can be misaligned from the time bin (zero returned for disjoint).
-    Uses the value_cache: if not present in cache, adds and assumes default value
-    as specified in the initial_running_jobs_fields.
-
-    arguments:
-        ad    --  the classad of the job
-        field --  the classad field of which to measure the change in [t0,t1]
-        t0    --  the initial time (seconds since epoch) of the time bin
-        t1    --  the final time (seconds since epoch) of the time bin
-    """
-    jobID = ad[SpecialClassAds.JOB_ID]
-    oldval = get_val_and_time_from_cache(field, jobID)
-    if not oldval:
-        TODO ACTUALLY DO DIS
-'''
 
 
 
