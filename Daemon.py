@@ -673,7 +673,8 @@ def create_influx_database(db_name, domain):
 def push_metric_data_to_influx_db(db_metrics, domain):
     """
     pushes raw formatted metric data (orgnasied by destination database name) to influx DB's at domain.
-    records any data which failed to be pushed and returns
+    records any data which failed to be pushed and returns. Creates a new influxDB if the database didn't
+    already exist at the domain
 
     arguments:
         db_metrics -- a dict of database name to a string of raw data to push (InfluxDB HTTP push format)
@@ -682,10 +683,6 @@ def push_metric_data_to_influx_db(db_metrics, domain):
     returns:
         {db: data, ...} -- a dict of database name to raw string data which failed to be pushed
     """
-
-    #TODO: check if the database actually exists (try to push and fail?)
-
-
     # prepare the URL
     if domain[-1] != "/":
         domain += "/"
@@ -708,11 +705,26 @@ def push_metric_data_to_influx_db(db_metrics, domain):
                     if create_influx_database(db_name, domain):
 
                         # if created database, try to push again
-                        #TODO push_metric_data_to_influx_db(db_metrics, domain)
-                        #TODO can't recurse, we need to only retry just this one
+                        try:
+                            urllib2.urlopen(req)
+                        except:
+                            print "Created new database %s but failed to push to it:" % db_name
+                            print db_metrics[db_name]
+                            failed[db_name] = db_metrics[db_name]
+                    else:
+                        print (("Failed to create new database %s at %s. " % (db_name, domain)) +
+                                "The follow data failed to be pushed:\n" + db_metrics[db_name])
+                        failed[db_name] = db_metrics[db_name]
 
-
-            failed[db_name] = db_metrics[db_name]
+                else:
+                    print "We failed (404) trying to push the follow metric data to database %s at %s:" % (db_name, domain)
+                    print db_metrics[db_name]
+                    failed[db_name] = db_metrics[db_name]
+            else:
+                print "We failed (%s) trying to push the follow metric data to database %s at %s:" % (
+                        str(err.code), db_name, domain)
+                print db_metrics[db_name]
+                failed[db_name] = db_metrics[db_name]
 
     return failed
 
@@ -948,6 +960,8 @@ for metric in context.metrics:
 
 failed = push_metric_data_to_influx_db[metric_data, context.database_domain]
 
+print "This shit failed to be pushed:"
+print failed
 
 
 
