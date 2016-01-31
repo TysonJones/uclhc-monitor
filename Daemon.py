@@ -769,7 +769,7 @@ for metric in context.metrics:
                            #each groupscode has a 'groups' dict and a 'jobs' list
                            #each job is {'value': val, 'duration': dur}
 
-        results_for_bin = {}   # {groupscode: {'groups':{...}, 'result': val}
+        results_for_bin = []   # [(val, groups), ...] where groups = {'Owner':'trjones',...}
 
         # summing all jobs (or pre-organised subset, if COUNTER and FIRST | LAST) per group
         if (metric_op == RawMetricFields.AggregationOps.SUM or
@@ -778,26 +778,62 @@ for metric in context.metrics:
             metric_op == CounterMetricFields.AggregationOps.INITIAL or
             metric_op == CounterMetricFields.AggregationOps.FINAL):
 
-            for groups_code in vals_for_bin:
-                group_jobs   = vals_for_bin[groups_code]['jobs']
-                group_groups = vals_for_bin[groups_code]['groups']
+            for group_code in vals_for_bin:
+                group_jobs   = vals_for_bin[group_code]['jobs']
+                group_groups = vals_for_bin[group_code]['groups']
                 result = sum([group_job['value'] for group_job in group_jobs])
-                results_for_bin[groups_code] = {'result': result, 'groups':group_groups}
+                results_for_bin.append((result, group_groups))
 
         if (metric_op == RawMetricFields.AggregationOps.WEIGHTED_AVERAGE or
             metric_op == DifferenceMetricFields.AggregationOps.WEIGHTED_AVERAGE):
 
-            pass
+            for group_code in vals_for_bin:
+                group_jobs = vals_for_bin[group_code]['jobs']
+                group_groups = vals_for_bin[group_code]['groups']
 
-        if (metric_op == CounterMetricFields.AggregationOps.WEIGHTED_AVERAGE):
-            pass
+                total_duration = 0
+                total_weighted = 0
+                for group_job in group_jobs:
+                    total_weighted += group_job['value'] * group_job['duration']
+                    total_duration += group_job['duration']
+                result = total_weighted / total_duration
+                results_for_bin.append((result, group_groups))
+
+        if metric_op == CounterMetricFields.AggregationOps.WEIGHTED_AVERAGE:
+
+            for group_code in vals_for_bin:
+                group_jobs = vals_for_bin[group_code]['jobs']
+                group_groups = vals_for_bin[group_code]['groups']
+
+                total_weighted = 0
+                for group_job in group_jobs:
+                    total_weighted += group_job['value'] * group_job['duration']
+                result = total_weighted / context.bin_duration
+                results_for_bin.append((result, group_groups))
 
         if (metric_op == RawMetricFields.AggregationOps.AVERAGE or
             metric_op == DifferenceMetricFields.AggregationOps.AVERAGE):
-            pass
+
+            for group_code in vals_for_bin:
+                group_jobs = vals_for_bin[group_code]['jobs']
+                group_groups = vals_for_bin[group_code]['groups']
+
+                total_unweighted = 0
+                total_jobs = 0
+                for group_job in group_jobs:
+                    total_unweighted += group_job['value']
+                    total_jobs += 1
+                result = total_unweighted / total_jobs
+                results_for_bin.append((result, group_groups))
 
 
+        "submit metrics for this bin"
+        vals_at_bins.append(results_for_bin)
 
+
+    "submit all info for this metric"
+
+    # vals_at_bins = [  [ (val, groups), (val, groups), ...], ... ] where groups = {'Owner':'trjones',...}
 
 
 
