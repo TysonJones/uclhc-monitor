@@ -14,7 +14,9 @@
 
 import sys; sys.dont_write_bytecode = True
 
-#import classad
+import classad
+import urllib
+import urllib2
 import time
 import json
 import os
@@ -38,6 +40,11 @@ class Labels:
 
     # the placeholder for a metric group val to use as an influxDB tag, if a job didn't have a value
     METRIC_GROUP_UNKNOWN_VALUE = "unknown"
+
+
+class InfluxPatterns:
+    """string patterns used by InfluxDB in its HTTP responses"""
+    INEXISTANT_DATABASE = "database not found"
 
 
 class CondorDudValues:
@@ -108,6 +115,7 @@ class ConfigFields:
     """labels of the fields in the configuration file"""
     BIN_DURATION = "bin duration"
     OUTBOX_DATA_LIMIT = "outbox data limit"
+    DATABASE_DOMAIN = "database domain"
     METRICS = "metrics"
 
 
@@ -239,6 +247,7 @@ def spoof_config_metrics():
     conf = {
         ConfigFields.BIN_DURATION: 1,
         ConfigFields.OUTBOX_DATA_LIMIT: 1000,
+        ConfigFields.DATABASE_DOMAIN: "http://test-003.t2.ucsd.edu:8086",
         ConfigFields.METRICS: [
             # {
             #     MetricsFields.DATABASE_NAME: "RunningJobs",
@@ -616,6 +625,98 @@ def is_job_status_in_metric_statuses(job_status, prev_job_status, metric_statuse
     return False
 
 
+def get_influx_DB_write_string_from_metric_data(metric, metric_vals_at_bins, bin_times):
+    """
+    formats metric data (values of metric at every bin time) into a Influx DB HTTP Push string. These
+    are database specific and can be merged with other Influx pushes to the same database
+
+    arguments:
+        metric              -- the metric specification object
+        metric_vals_at_bins -- the values (split into groups) of the metric at each bin time
+        bin_times           -- an array of the starting time of each bin, coordinated with vals
+
+    returns:
+        a string of all metric data formatted to the Influx DB HTTP Push standard.
+    """
+
+    # vals_at_bins = [  [ (val, groups), (val, groups), ...], ... ] where groups = {'Owner':'trjones',...}
+
+    measurement = metric[MetricsFields.MEASUREMENT_NAME]
+    metric_string = ""
+    for i in range(len(metric_vals_at_bins)):
+        for pair in metric_vals_at_bins[i]:
+            val    = pair[0]
+            groups = pair[1]
+            tag_segment = ','.join([label + '=' + groups[label] for label in groups])
+            line = measurement + "," + tag_segment + " value=" + str(val) + " " + str(bin_times[i])
+            metric_string += line + "\n"
+    return metric_string[:-1]  # remove trailing newline
+
+
+def create_influx_database(db_name, domain):
+    """attempts to create a new database at the specified domain. If successful returns true, else false"""
+
+    # prepare the URL
+    if domain[-1] != "/":
+        domain += "/"
+    url = domain + "query?q=CREATE%20DATABASE%20"+db_name
+
+    req = urllib2.Request(url)
+    try:
+        urllib2.urlopen(req)
+        return True
+    except:
+        return False
+
+
+
+def push_metric_data_to_influx_db(db_metrics, domain):
+    """
+    pushes raw formatted metric data (orgnasied by destination database name) to influx DB's at domain.
+    records any data which failed to be pushed and returns
+
+    arguments:
+        db_metrics -- a dict of database name to a string of raw data to push (InfluxDB HTTP push format)
+        domain     -- the internet domain of the destination databases
+
+    returns:
+        {db: data, ...} -- a dict of database name to raw string data which failed to be pushed
+    """
+
+    #TODO: check if the database actually exists (try to push and fail?)
+
+
+    # prepare the URL
+    if domain[-1] != "/":
+        domain += "/"
+
+    # prepare a list of failed metrics
+    failed = {}  # {db name: "data", ...}
+
+    # try to push relevant data to each database, recording failures
+    for db_name in db_metrics:
+        url = domain + "write?db=" + db_name
+        req = urllib2.Request(url, db_metrics[db_name])
+        try:
+            urllib2.urlopen(req)
+        except urllib2.HTTPError, err:
+            if err.code == 404:
+                msg = err.read()
+                if InfluxPatterns.INEXISTANT_DATABASE in msg:
+
+                    # try create the database
+                    if create_influx_database(db_name, domain):
+
+                        # if created database, try to push again
+                        #TODO push_metric_data_to_influx_db(db_metrics, domain)
+                        #TODO can't recurse, we need to only retry just this one
+
+
+            failed[db_name] = db_metrics[db_name]
+
+    return failed
+
+
 class ContextData:
     def __init__(self):
         """Grabs the required contextual data from files (and some calculations)"""
@@ -625,6 +726,7 @@ class ContextData:
         self.job_init_vals = load_job_init_vals()
         config             = load_config()
         self.bin_duration  = config[ConfigFields.BIN_DURATION]
+        self.database_domain = config[ConfigFields.DATABASE_DOMAIN]
         self.metrics       = config[ConfigFields.METRICS]
         self.current_time  = int(time.time())  # may be overwritten by class stripper to ServerTime
 
@@ -641,6 +743,9 @@ class ContextData:
 spoof_config_metrics()
 spoof_val_cache()
 
+
+
+
 # get contextual values
 context = ContextData()
 
@@ -651,9 +756,9 @@ context.update_current_time_to_server_time(jobs)
 # get the times of each bin (inclusive of start, excludes end time of final bin)
 bin_times = range(context.last_bin_time, context.current_time, context.bin_duration)[:-1]
 
-
-
 "for each metric, work out its value(s) at every time bin"
+
+metric_data = {}   # { Database name: string (grows), ... }
 
 for metric in context.metrics:
 
@@ -832,12 +937,16 @@ for metric in context.metrics:
 
 
     "submit all info for this metric"
-
     # vals_at_bins = [  [ (val, groups), (val, groups), ...], ... ] where groups = {'Owner':'trjones',...}
 
+    metric_string = get_influx_DB_write_string_from_metric_data(metric, vals_at_bins, bin_times)
+    if metric[MetricsFields.DATABASE_NAME] in metric_data:
+        metric_data[metric[MetricsFields.DATABASE_NAME]] += "\n" + metric_string
+    else:
+        metric_data[metric[MetricsFields.DATABASE_NAME]] = metric_string
 
 
-
+failed = push_metric_data_to_influx_db[metric_data, context.database_domain]
 
 
 
