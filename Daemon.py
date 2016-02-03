@@ -1031,6 +1031,9 @@ print "This shit failed to be pushed:"
 print failed
 
 
+# TODO: images to the readme/setup guide!
+
+
 
 # TODO: update the outbox
 
