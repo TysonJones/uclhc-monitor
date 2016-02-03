@@ -14,12 +14,10 @@
 
 import sys; sys.dont_write_bytecode = True
 
-import classad
-import urllib
+import htcondor
 import urllib2
 import time
 import json
-import os
 
 
 PRINT_DEBUGS = True
@@ -140,13 +138,15 @@ class MetricsFields:
         IDLE_THEN_REMOVED = "IDLE THEN REMOVED"
         RUNNING_OR_RAN = "RUNNING OR RAN"
 
+        ALL = "ALL"
+
     AGGREGATE_OP = "aggregation operation"
     METRIC_TYPE = "metric type"
     class MetricTypes:
         """labels of the types a metric can be"""
         RAW = "RAW"
         COUNTER = "COUNTER"
-        DIFFERENCE = "DIFFERENCE"
+        CHANGE = "CHANGE"
 
 class RawMetricFields:
     VALUE_CLASSAD_FIELD = "value ClassAd field"
@@ -156,7 +156,7 @@ class RawMetricFields:
         AVERAGE = "AVERAGE"
         WEIGHTED_AVERAGE = "WEIGHTED AVERAGE"
 
-class DifferenceMetricFields:
+class ChangeMetricFields:
     VALUE_CLASSAD_FIELD = "value ClassAd field"
 
     class AggregationOps:
@@ -171,6 +171,24 @@ class CounterMetricFields:
         INITIAL = "INITIAL"
         FINAL = "FINAL"
         WEIGHTED_AVERAGE = "WEIGHTED AVERAGE"
+
+
+def json_load_as_ascii(file_handle):
+    return convert_to_ascii(
+        json.load(file_handle, object_hook=convert_to_ascii),
+        ignore_dicts=True)
+
+
+def convert_to_ascii(data, ignore_dicts = False):
+    if isinstance(data, unicode):
+        return data.encode('utf-8')
+    if isinstance(data, list):
+        return [convert_to_ascii(item, ignore_dicts=True) for item in data ]
+    if isinstance(data, dict) and not ignore_dicts:
+        return dict([
+            (convert_to_ascii(key, ignore_dicts=True), convert_to_ascii(value, ignore_dicts=True))
+            for key, value in data.iteritems()])
+    return data
 
 
 def load_last_bin_time():
@@ -196,7 +214,7 @@ def load_prev_val_cache():
         {}  -  the cache of values:{GlobalJobId: {field: [val, time], ...}, ... }
     """
     f = open(Filenames.VALUE_CACHE, 'r')
-    j = json.load(f)
+    j = json_load_as_ascii(f)
     f.close()
     return j
 
@@ -204,7 +222,7 @@ def load_prev_val_cache():
 def load_job_init_vals():
     """returns a dictionary of the initial values of job classad fields set when a job first runs"""
     f = open(Filenames.INIT_JOB_FIELDS, 'r')
-    j = json.load(f)
+    j = json_load_as_ascii(f)
     f.close()
     return j
 
@@ -212,7 +230,7 @@ def load_job_init_vals():
 def load_config():
     """returns a dict of config settings."""
     f = open(Filenames.CONFIG, 'r')
-    j = json.load(f)
+    j = json_load_as_ascii(f)
     f.close()
     return j
 
@@ -220,7 +238,7 @@ def load_config():
 def load_outbox():
     """returns the contents of the outbox."""
     f = open(Filenames.OUTBOX, 'r')
-    j = json.load(f)
+    j = json_load_as_ascii(f)
     f.close()
     return j
 
@@ -228,7 +246,7 @@ def load_outbox():
 def add_to_outbox(jobs):
     """adds a list of failed (to push) jobs to the outbox"""
     f = open(Filenames.OUTBOX, 'r+')
-    j = json.load(f)
+    j = json_load_as_ascii(f)
     f.seek(0)
     f.truncate()
     json.dump(j + jobs, f)
@@ -245,7 +263,7 @@ def add_to_log(message):
 # debug
 def spoof_config_metrics():
     conf = {
-        ConfigFields.BIN_DURATION: 1,
+        ConfigFields.BIN_DURATION: 100,
         ConfigFields.OUTBOX_DATA_LIMIT: 1000,
         ConfigFields.DATABASE_DOMAIN: "http://test-003.t2.ucsd.edu:8086",
         ConfigFields.METRICS: [
@@ -260,27 +278,34 @@ def spoof_config_metrics():
             #                                              "at the end of each bin")
             # },
             #
+             {
+                 MetricsFields.DATABASE_NAME: "MetricTest",
+                 MetricsFields.MEASUREMENT_NAME: "cpu_time",
+                 MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.CHANGE,
+                 ChangeMetricFields.VALUE_CLASSAD_FIELD: "RemoteUserCpu",
+                 MetricsFields.GROUP_FIELDS: ["Owner", "MATCH_EXP_JOB_Site"],
+                 MetricsFields.AGGREGATE_OP: ChangeMetricFields.AggregationOps.SUM,
+                 MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
+                 MetricsFields.DESCRIPTION: "The CPU time used by each owner on each job site per bin."
+             },
             # {
-            #     MetricsFields.DATABASE_NAME: "RunningJobs",
-            #     MetricsFields.MEASUREMENT_NAME: "cpu_time",
-            #     MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.DIFFERENCE,
-            #     DifferenceMetricFields.VALUE_CLASSAD_FIELD: "RemoteUserCpu",
-            #     MetricsFields.GROUP_FIELDS: ["Owner", "MATCH_EXP_JOB_Site"],
-            #     MetricsFields.AGGREGATE_OP: MetricsFields.AggregationOps.SUM,
-            #     MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
-            #     MetricsFields.DESCRIPTION: "The CPU time used by each owner on each job site per bin."
+            #     MetricsFields.DATABASE_NAME: "MetricTest",
+            #     MetricsFields.MEASUREMENT_NAME: "num_idle",
+            #     MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
+            #     MetricsFields.GROUP_FIELDS: ["Owner"],
+            #     MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.FINAL,
+            #     MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.IDLE,
+            #                                MetricsFields.JobStatuses.IDLE_THEN_REMOVED],
+            #     MetricsFields.DESCRIPTION: "Number of idle jobs per user at the end of each time bin, which remain running now"
+            # },
+            # {
+            #     MetricsFields.DATABASE_NAME: "MetricTest",
+            #     MetricsFields.MEASUREMENT_NAME: "num_total_jobs",
+            #     MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
+            #     MetricsFields.GROUP_FIELDS: ["SUBMIT_SITE"],
+            #     MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.ALL,
+            #     MetricsFields.JOB_STATUS: []
             # }
-            {
-                MetricsFields.DATABASE_NAME: "MetricTest",
-                MetricsFields.MEASUREMENT_NAME: "num_idle",
-                MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
-                MetricsFields.GROUP_FIELDS: ["Owner"],
-                MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.FINAL,
-                MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.HELD,
-                                           MetricsFields.JobStatuses.IDLE_THEN_REMOVED,
-                                           MetricsFields.JobStatuses.RUNNING_OR_RAN],
-                MetricsFields.DESCRIPTION: "Number of idle jobs per user at the end of each time bin, which remain running now"
-            }
         ]
     }
 
@@ -289,6 +314,7 @@ def spoof_config_metrics():
     f.close()
 
 
+'''
 def get_running_condor_job_ads(constraint):
     """
     returns classads of all currently running jobs which satisfy the constraint
@@ -298,10 +324,13 @@ s
     """
     cmd = "condor_q -l -const '%s' " % constraint
     DEBUG_PRINT("Calling a Condor binary: ", cmd)
-    ads = classad.parseOldAds(os.popen(cmd))
+    #ads = classad.parseOldAds(os.popen(cmd))
+    ads = classad.parseAds(os.popen(cmd).read())             # TODO: can't iterate this shit!
     return ads
+'''
 
 
+'''
 def get_old_condor_job_ads_since(constraint, since_time):
     """
     returns classads of all jobs in condor history which satisfy the constraint, AND entered their current state
@@ -314,15 +343,21 @@ def get_old_condor_job_ads_since(constraint, since_time):
     limit = SpecialClassAds.ENTERED_STATUS_TIME + ' ' + CondorOperators.GREATER_THAN + ' ' + str(since_time)
     cmd = "condor_history -l -const '(%s %s %s)' " % (constraint, CondorOperators.AND, limit)
     DEBUG_PRINT("Calling a Condor binary: ", cmd)
-    ads = classad.parseOldAds(os.popen(cmd))
+    #ads = classad.parseOldAds(os.popen(cmd))
+    ads = classad.parseAds(os.popen(cmd).read())            # TODO: can't iterate this shit!
     return ads
+'''
 
 
+# unneeded since integrating condor bindings
+'''
 def get_stripped_classad(classad, fields):
     """
     returns a dict of only the classad fields in the passed list fields (with their classad values).
     If a field in fields isn't in the classad, it is skipped. I.e. the returned structure does not necessarily
     contain every field in fields, but it is gauranteed not to contain any field not in fields.
+    However, if the job is currently idle and has never run, it has no LastJobStatus: this is
+    manually added to be None (is referred to in other code but the value should never used).
     Also sets the current time of the script to be the classads server time, in ContextData
     """
     if SpecialClassAds.SERVER_TIME in classad:
@@ -334,7 +369,13 @@ def get_stripped_classad(classad, fields):
         field = str(field)
         if field in classad:
             stripped[field] = classad[field]
+
+    # add a dud LastJobStatus to idle jobs which never ran
+    if SpecialClassAds.LAST_JOB_STATUS not in stripped:
+        stripped[SpecialClassAds.LAST_JOB_STATUS] = None
+
     return stripped
+'''
 
 
 def get_relevant_jobs_and_fields_for_metrics(metrics, since_time):
@@ -357,6 +398,7 @@ def get_relevant_jobs_and_fields_for_metrics(metrics, since_time):
         MetricsFields.JobStatuses.REMOVED:      False,
         MetricsFields.JobStatuses.COMPLETED:    False,
         MetricsFields.JobStatuses.HELD:         False,
+        MetricsFields.JobStatuses.ALL:          False,
         MetricsFields.JobStatuses.RAN_THEN_REMOVED:     False,
         MetricsFields.JobStatuses.IDLE_THEN_REMOVED:    False,
         MetricsFields.JobStatuses.RUNNING_OR_RAN:       False,
@@ -368,9 +410,13 @@ def get_relevant_jobs_and_fields_for_metrics(metrics, since_time):
         for status in metric[MetricsFields.JOB_STATUS]:
             required_status[status] = True
 
-        # mark that a ClassAd field is needed
+        # mark that a ClassAd field is needed (groups and main val)
         for field in metric[MetricsFields.GROUP_FIELDS]:
             required_fields.add(field)
+        if metric[MetricsFields.METRIC_TYPE] == MetricsFields.MetricTypes.RAW:
+            required_fields.add(metric[RawMetricFields.VALUE_CLASSAD_FIELD])
+        if metric[MetricsFields.METRIC_TYPE] == MetricsFields.MetricTypes.CHANGE:
+            required_fields.add(metric[ChangeMetricFields.VALUE_CLASSAD_FIELD])
 
     "build condor query JobStatus constraints"
     # constraints which are to be OR'd
@@ -387,6 +433,10 @@ def get_relevant_jobs_and_fields_for_metrics(metrics, since_time):
     OR = ' ' + CondorOperators.OR + ' '
 
     # build constraint constituents based on required statuses (some are compound)
+    if required_status[MetricsFields.JobStatuses.ALL]:
+        consts.append("true")
+        condor_q = True
+        condor_history = True
     if required_status[MetricsFields.JobStatuses.IDLE]:
         consts.append(STATUS + EQUALS + str(JobStatus.IDLE))
         condor_q = True
@@ -429,20 +479,20 @@ def get_relevant_jobs_and_fields_for_metrics(metrics, since_time):
     if len(consts) > 0:
         constraint = '(' + (')' + OR + '(').join(consts) + ')'
 
-    "collect the relevant jobs and fields from condor_q"
+    # prepare the condor python bindings
+    schedd = htcondor.Schedd()
+
+    "collect the relevant jobs and fields from condor"
     # jobs are formatted as dicts of required_fields to their condor values
     jobs = []
     if condor_q:
-        ads = get_running_condor_job_ads(constraint)
-        for ad in ads:
-            jobs.append(get_stripped_classad(ad, required_fields))
-
-    "collect the relevant jobs and fields from condor_history"
+        jobs += schedd.query(constraint, list(required_fields))
     if condor_history:
-        ads = get_old_condor_job_ads_since(constraint, since_time)
-        for ad in ads:
-            jobs.append(get_stripped_classad(ad, required_fields))
-
+        limit = SpecialClassAds.ENTERED_STATUS_TIME + ' ' + CondorOperators.GREATER_THAN + ' ' + str(since_time)
+        constraint = "(%s %s %s)" % (constraint, CondorOperators.AND, limit)
+        olds = schedd.history(constraint, list(required_fields), 10000000)     # TODO: magic number
+        for ad in olds:
+            jobs.append(ad)
     return jobs
 
 
@@ -486,11 +536,13 @@ def get_prev_value_from_cache(jobID, field, init_time, context):
         return context.prev_value_cache[jobID][field] # [val, time]
 
     # otherwise, we must assume the previous val as initial at job start
-    # if it's not in the init value list, reporet error and exit
+    # if it's not in the init value list, report error and exit
+    print "field", field
+    print "init vals:", context.job_init_vals
     if field not in context.job_init_vals:
-        print ("ERROR! The difference in field %s was requested, which requires "+
+        print ("ERROR! The change in field %s was requested, which requires "+
                "previous value caching. The requested field does NOT appear in "+
-               "the initial value cache (%s). Please add it and its initial value!"
+               "the initial value cache (%s). Please add it and its initial value! Exiting"
                ) % (field, Filenames.INIT_JOB_FIELDS)
         exit()
 
@@ -541,12 +593,12 @@ def get_duration_of_job_within_bin(job, t0, t1):
 
     # job is entirely outside bin
     if (end <= t0) or (start >= t1):
-        return 0
+        return [0, start, end]
 
     # the time for which the job runs within the bin
     time_in_bin = min(end, t1) - max(t0, start)
 
-    return [time_in_bin, start, end]
+    return (time_in_bin, start, end)
 
 
 def get_change_in_val_over_bin(job, field, t0, t1, context):
@@ -579,7 +631,6 @@ def get_change_in_val_over_bin(job, field, t0, t1, context):
 
     return [val_change_in_bin, time_in_bin]
 
-    #TODO: cache the results! No floating maths
 
 
 def is_job_status_in_metric_statuses(job_status, prev_job_status, metric_statuses):
@@ -595,7 +646,13 @@ def is_job_status_in_metric_statuses(job_status, prev_job_status, metric_statuse
     returns:
         True or False
     """
+    # no specified statuses means it wants to se all jobs
+    if len(metric_statuses) == 0:
+        return True
+
     for req_stat in metric_statuses:
+        if req_stat == MetricsFields.JobStatuses.ALL:
+            return True
         if (req_stat == MetricsFields.JobStatuses.IDLE) and (job_status == JobStatus.IDLE):
             return True
         if (req_stat == MetricsFields.JobStatuses.RUNNING) and (job_status == JobStatus.RUNNING):
@@ -667,7 +724,6 @@ def create_influx_database(db_name, domain):
         return True
     except:
         return False
-
 
 
 def push_metric_data_to_influx_db(db_metrics, domain):
@@ -767,6 +823,7 @@ context.update_current_time_to_server_time(jobs)
 
 # get the times of each bin (inclusive of start, excludes end time of final bin)
 bin_times = range(context.last_bin_time, context.current_time, context.bin_duration)[:-1]
+DEBUG_PRINT("initial bin time is %d of duration %d" % (context.last_bin_time, context.bin_duration))
 
 "for each metric, work out its value(s) at every time bin"
 
@@ -778,6 +835,8 @@ for metric in context.metrics:
 
     metric_type = metric[MetricsFields.METRIC_TYPE]
     metric_op   = metric[MetricsFields.AGGREGATE_OP]
+
+    DEBUG_PRINT("processing metric: ", metric)
 
     for bin_start in bin_times:
 
@@ -792,6 +851,8 @@ for metric in context.metrics:
 
         for job in jobs:
 
+            #TODO: actually irrelevanr jobs should be skipped here!!!
+
             # skip the job if it doesn't satisfy the metrics status requirements
             if not is_job_status_in_metric_statuses(
                     job[SpecialClassAds.JOB_STATUS],
@@ -804,17 +865,22 @@ for metric in context.metrics:
 
             value, duration = None, None
 
-            if metric_type == MetricsFields.MetricTypes.DIFFERENCE:
+            if metric_type == MetricsFields.MetricTypes.CHANGE:
 
-                # condor field of the value we want to find the difference in
-                val_field = metric[DifferenceMetricFields.VALUE_CLASSAD_FIELD]
+                # condor field of the value we want to find the change in
+                val_field = metric[ChangeMetricFields.VALUE_CLASSAD_FIELD]
 
                 # skip the job if it doesn't contain the required (but not group) fields and report error
                 if val_field not in job:
+
+                    #TODO: this isn't actually an error. Not all jobs match your thing
+                    #TODO: you should have an IF to look only at your specified jobs!!!!!!!!!
+                    #TODO: (which is required for total validity, not just to avoid ins)
+
                     print "ERROR! The following job:\n#####"
                     print job
                     print ("#####\ndid not contain the field %s as required by the following metric:" %
-                            metric[DifferenceMetricFields.VALUE_CLASSAD_FIELD])
+                            metric[ChangeMetricFields.VALUE_CLASSAD_FIELD])
                     print metric
                     continue
 
@@ -822,7 +888,7 @@ for metric in context.metrics:
 
                 # get the change in the desired val
                 value, duration = get_change_in_val_over_bin(
-                        job, metric,
+                        job, metric[ChangeMetricFields.VALUE_CLASSAD_FIELD],
                         bin_start, bin_start + context.bin_duration,
                         context)
 
@@ -836,13 +902,12 @@ for metric in context.metrics:
                     print "ERROR! The following job:\n#####"
                     print job
                     print ("#####\ndid not contain the field %s as required by the following metric:" %
-                            metric[DifferenceMetricFields.VALUE_CLASSAD_FIELD])
+                            metric[ChangeMetricFields.VALUE_CLASSAD_FIELD])
                     print metric
                     continue
 
                 value = job[val_field]
                 duration = get_duration_of_job_within_bin(job, bin_start, bin_start + context.bin_duration)[0]
-
 
             if metric_type == MetricsFields.MetricTypes.COUNTER:
 
@@ -890,7 +955,7 @@ for metric in context.metrics:
 
         # summing all jobs (or pre-organised subset, if COUNTER and FIRST | LAST) per group
         if (metric_op == RawMetricFields.AggregationOps.SUM or
-            metric_op == DifferenceMetricFields.AggregationOps.SUM or
+            metric_op == ChangeMetricFields.AggregationOps.SUM or
             metric_op == CounterMetricFields.AggregationOps.ALL or
             metric_op == CounterMetricFields.AggregationOps.INITIAL or
             metric_op == CounterMetricFields.AggregationOps.FINAL):
@@ -902,7 +967,7 @@ for metric in context.metrics:
                 results_for_bin.append((result, group_groups))
 
         if (metric_op == RawMetricFields.AggregationOps.WEIGHTED_AVERAGE or
-            metric_op == DifferenceMetricFields.AggregationOps.WEIGHTED_AVERAGE):
+            metric_op == ChangeMetricFields.AggregationOps.WEIGHTED_AVERAGE):
 
             for group_code in vals_for_bin:
                 group_jobs = vals_for_bin[group_code]['jobs']
@@ -929,7 +994,7 @@ for metric in context.metrics:
                 results_for_bin.append((result, group_groups))
 
         if (metric_op == RawMetricFields.AggregationOps.AVERAGE or
-            metric_op == DifferenceMetricFields.AggregationOps.AVERAGE):
+            metric_op == ChangeMetricFields.AggregationOps.AVERAGE):
 
             for group_code in vals_for_bin:
                 group_jobs = vals_for_bin[group_code]['jobs']
@@ -957,8 +1022,10 @@ for metric in context.metrics:
     else:
         metric_data[metric[MetricsFields.DATABASE_NAME]] = metric_string
 
+    DEBUG_PRINT("Metric yielded an influxDB push:\n", metric_string)
 
-failed = push_metric_data_to_influx_db[metric_data, context.database_domain]
+
+failed = push_metric_data_to_influx_db(metric_data, context.database_domain)
 
 print "This shit failed to be pushed:"
 print failed
