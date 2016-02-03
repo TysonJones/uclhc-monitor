@@ -190,7 +190,9 @@ TODO
 
 #### <i class="icon-cog"></i> Create Custom Metrics
 
-Custom metrics are specified in the `config` file in the `metrics` list as a **JSON** dictionary. They specify where the metrics are sent and how, **within each time bin** (which divides runtime from previous execution) the metric is calculated. For the best understanding, please see the visual explanations at the bottom of the document.
+Custom metrics are specified in the `config` file in the `metrics` list as a **JSON** dictionary. They specify where the metrics are sent and how, **within each time bin** (which divides runtime from previous execution) the metric is calculated.
+
+>For the best understanding, please see the visual explanations at the bottom of the document.
 
  Each metric must have the following keys:
 
@@ -294,4 +296,59 @@ Uses the database `Dormant` with a measurement called `idle_jobs` which gives th
     "description":             "The CPU time used by each owner on each job site per bin"
 }
 ```
+_____
 
+#Metric Types and Operations
+
+The `job statuses` discriminate which jobs are ever processed for this metric; for each time bin, only jobs which at least partially overlap the time bin and match a status with `job statuses` are ever involved in a metric's calculation. The job is considered *active* for the period it is within the considered status.
+
+Job's with differing values for the ClassAd fields specified in `group by ClassAds fields`  will be involved in separate metric calculations for that bin.
+
+From now, "all jobs in the bin" will refer to all jobs which can be involved in the metric's calculation (i.e. jobs of a satisfying `job statuses`, for a particular set of `group by ClassAds fields` values).
+_______
+
+##COUNTER
+
+The `COUNTER` metric type is used for counting the number of jobs in a bin, allowing one to count, for example, the number of idle jobs at each submit site, per user.
+
+The `aggregation operation` can further discriminate which jobs to count (by their time), or how to count them.
+### `INITIAL`
+
+Counts the number of jobs at the very start of the time bin.
+<img src="https://github.com/TysonJones/uclhc-monitor/blob/master/doc%20images/counter_initial.png?raw=true" width=50%>
+
+### `FINAL`
+Counts the number of jobs at the very end of the time bin.
+<img src="https://github.com/TysonJones/uclhc-monitor/blob/master/doc%20images/counter_final.png?raw=true" width=50%>
+
+### `ALL`
+Counts every job within the bin.
+<img src="https://github.com/TysonJones/uclhc-monitor/blob/master/doc%20images/counter_all.png?raw=true" width=50%>
+
+### `WEIGHTED AVERAGE`
+Calculates the average number of jobs at any time (weights each time domain of a differing number of jobs by the duration of that domain).
+<img src="https://github.com/TysonJones/uclhc-monitor/blob/master/doc%20images/counter_weighted_average.png?raw=true" width=50%>
+In affect, this gives the number (non-integer) of hypothetical jobs which ran for the full duration of the bin, of equal total running time as the true value.
+
+_______
+##RAW & DIFFERENCE
+
+The `RAW` metric type associates each job in a bin with a particular ClassAd value (specified by the required `value ClassAd field`).
+
+The `CHANGE` metric type associates with each job (for its extent in the bin) a value which happens to be the change in the specified `value ClassAd field` across the jobs extent in the bin.
+
+### `SUM`
+
+Sums the value associated with every job in the bin.
+<img src="https://github.com/TysonJones/uclhc-monitor/blob/master/doc%20images/change_sum.png?raw=true" width=50%>
+
+### `AVERAGE`
+Averages the value associated with each job across jobs in the bin.
+<img src="https://github.com/TysonJones/uclhc-monitor/blob/master/doc%20images/change_average.png?raw=true" width=50%>
+
+### `WEIGHTED AVERAGE`
+
+Averages the value associated with each job across the duration of all jobs, weighted by the duration of each.
+<img src="https://github.com/TysonJones/uclhc-monitor/blob/master/doc%20images/change_weighted_average.png?raw=true" width=50%>
+
+For time sensitive values, like the `CHANGE` in a time dependent field, this is usually the more sensible average.
