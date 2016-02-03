@@ -624,7 +624,7 @@ def get_change_in_val_over_bin(job, field, t0, t1, context):
     prev_val, prev_time = get_prev_value_from_cache(job[SpecialClassAds.JOB_ID], field, start, context)
 
     # change in val per unit time, incurred since prev
-    val_change_rate = (job[field] - prev_val)/float(end - prev_time)
+    val_change_rate = (job[field] - prev_val)/float(context.current_time - prev_time)
 
     # change in val over bin
     val_change_in_bin = time_in_bin * val_change_rate
@@ -1032,6 +1032,10 @@ print failed
 
 
 
+# TODO: update the outbox
+
+
+# TODO: update the prev_val_cache
 
 
 

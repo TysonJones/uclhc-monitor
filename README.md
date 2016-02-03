@@ -89,26 +89,24 @@ sudo yum localinstall telegraf-0.10.0-1.x86_64.rpm
 ```
 
 #### <i class="icon-cog"></i> Configure
-
+Tell Telegraf to send `cpu`, `memory`, `network,` `disk` and `disk io` metrics.
 ```
 cd /etc/telegraf
 
 telegraf -sample-config -input-filter cpu:mem:net:disk:diskio -output-filter influxdb > telegraf.conf
 ```
-Then, open `telegraf.conf` and navigate to the `OUTPUTS` section. 
+Then, open (the newly created) `telegraf.conf` and navigate to the `OUTPUTS` section.
 
 Replace
-``` 
+```
 urls = ["http://localhost:8086"]
 ```
 with
-``` 
+```
 urls = ["your-domain:8086"]
 ```
 where `your-domain` is the domain of the front-end (where the Influx Database is stored).
 
-
-TODO: specify the metrics we actually want.
 
 #### <i class="icon-play"></i> Start
 ```
@@ -167,14 +165,32 @@ TODO
 
 TODO
 
+
 #### <i class="icon-cog"></i> Create Grafana Graphs
+
+Before they can be used in graphs, any new databases created/used by metrics in the Daemon must be registered with Grafana as a `Data Source`.
+
+In the Grafana side bar, select `Data Sources`, and at the top click `Add New`.
+Give the database a new name for Grafana (visible when selecting a data source for a graph), and a
+**Type** of
+```
+InfluxDB 0.9.x
+```
+The **Url** should be
+```
+your-domain:8086
+```
+with **access** via `proxy`.
+
+The **Database** field should have the name of the database as defined in your custom metrics. The **User** and **Password** should be that which you've logged into Grafana with.
+
 
 TODO
 
 
 #### <i class="icon-cog"></i> Create Custom Metrics
 
-Custom metrics are specified in the `config` file in the `metrics` list as a **JSON** dictionary. They specify where the metrics are sent and how, within each time bin (which divides runtime from previous execution) the metric is aggregated.
+Custom metrics are specified in the `config` file in the `metrics` list as a **JSON** dictionary. They specify where the metrics are sent and how, **within each time bin** (which divides runtime from previous execution) the metric is calculated. For the best understanding, please see the visual explanations at the bottom of the document.
 
  Each metric must have the following keys:
 
@@ -182,32 +198,37 @@ Custom metrics are specified in the `config` file in the `metrics` list as a **J
 | ---------- | ----------| ------------- |
 |`database name` | The name of the influx database to which to push the metric. | `"RunningJobs"`|
 |`measurement name`| The name of the measurement as stored in the database. Must adhere to InfluxDB measurement name syntax.|`"num_jobs"`|
-|`metric type`| One of `RAW`, `COUNTER` or `DIFFERENCE`. Specifies the numerical nature of the metric. | `"DIFFERENCE"`|
-|`value ClassAd field`| The ClassAd field to use as numerical data. Only required if metrc type is `RAW` or `DIFFERENCE`.| `"RemoteUserCpu"`
-|`aggregation operation`|One of `SUM`, `LAST`, `FIRST`, `AVERAGE`. Specifies how to aggregate job values within each time bin.|`"SUM"`|
-|`group by ClassAd fields`| A list of the ClassAd fields by which to group aggregated data. Metric data with any differing field values are not aggregated and sent to the database individually | `["Owner", "SUBMIT_SITE"]`
-|`constraint` [NOT USED]|[NOT USED] Constrains the considered jobs in each time bin. Syntax: TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO |`"JobStatus =?= 1"`|
+|`metric type`| One of `RAW`, `COUNTER` or `CHANGE` (explained below). Specifies the numerical nature of the metric, or how each job contributes to a metric. | `"CHANGE"`|
+|`value ClassAd field`| The ClassAd field to use as numerical data. Only required if metrc type is `RAW` or `CHANGE`.| `"RemoteUserCpu"`
+|`aggregation operation`|Available operations are specific to the `metric type` (see below) and specify how the contributions of each job to a metric are aggregated.|`"SUM"`|
+|`group by ClassAd fields`| A list of the ClassAd fields by which to group aggregated data. Metric data with any differing field values are not aggregated and sent to the database individually. If **n** fields are specified, each time datum will have **n** qualifiers. | `["Owner", "SUBMIT_SITE"]`|
 |`description`| A description (for humans) of the metric|`"The CPU time used by each owner on each job site per bin"`|
-|`job status`|A list of job statuses. Only jobs of a status in the list are included in the metric. Job statuses are `IDLE`, `RUNNING`, `REMOVED`, `COMPLETED`, `HELD`, `TRANSFERRING_OUTPUT`, `RAN_THEN_REMOVED`, `IDLE_THEN_REMOVED`, and `RUNNING OR RAN`.|`["RUNNING", "COMPLETED", "RAN_THEN_REMOVED"]` would match all jobs which are running or ended while running.|
+|`job statuses`|A list of job statuses. Only jobs of a status in the list are included in each bin calculation, and thus the metric. Job statuses are `IDLE`, `RUNNING`, `REMOVED`, `COMPLETED`, `HELD`, `TRANSFERRING_OUTPUT`, `RAN_THEN_REMOVED`, `IDLE_THEN_REMOVED`, and `RUNNING OR RAN`.|`["RUNNING", "COMPLETED", "RAN_THEN_REMOVED"]` would match all jobs which are running or ended while running (equivalent to `RUNNING_OR_RAN`).|
 
 
 
 
 
 
-| Metric Type | Explanation | Example |
+| Metric Types | Explanation | Example |
 |-------------| ------------| --------|
-| `RAW`         | Grabs a single (numerical) value from each job's ClassAd with no operations. Requires that the **value ClassAd field** is also specified. |   |
-| `COUNTER` | Counts each job. I.e. increments a value for each job. | Get the number of idle jobs.
-| `DIFFERENCE` | Measures the difference in a single (numerical) ClassAd value since previously considered time. Used for measuring rates. Requires that the **value Classad field** is also specified.| Get the rate of CPU time.
+| `RAW`         | Contributes a numerical value straight from each job's ClassAd to the bin. Requires that the **value ClassAd field** is also specified. |   |
+| `CHANGE` | Contributes each job's change in a numerical ClassAd value since the time of its previous known value (linearly interpolated across each bin) to the bin. Requires that the **value Classad field** is also specified.| Get the rate of CPU time.|
+| `COUNTER` | Counts the number of relevant jobs in the bin. I.e. each job contributes 1 to a growing increment for the bin.| Get the number of idle jobs.|
 
 
-|Aggregation Operation|Explanation|Example|
+|`RAW` and `CHANGE` Aggregation Operations|Explanation|Example|
 |----|-------|------|
-| `SUM` | Sums all values with the same group values in the time bin | Use with `DIFFERENCE`, get the total rate of CPU time of an owner|
-| `FIRST` | Uses only the first value (the earliest job) in the time bin| |
-| `LAST` | Uses only the last value (the latest job) in the time bin| Use with `COUNTER`, get the final (per time bin) number of running jobs|
-|`AVERAGE` | Averages (time weighted) the values in the time bin | |
+| `SUM` | Sums the raw values or changes thereof of each job in the bin. $$ \sum_i \text{job}_i $$ | Use with `CHANGE`, get the total rate of CPU time of an owner|
+| `AVERAGE` | Averages the raw values or changes thereof of each job in the bin, by the number of jobs. $$\frac{\sum_i \text{job}_i}{\#\text{jobs}}$$|
+| `WEIGHTED AVERAGE` | Averages the raw values of changes thereof of each job, weighted by the duration of that job within the bin, over time. That is, jobs which span the entire bin or most of it more strongly affect the average than jobs running only shortly within the bin. $$ \frac{ \sum_i \text{job}_i \Delta t_i}{ \sum_i \Delta t_i}$$|
+
+| `COUNTER` Aggregation Operations | Explanation | Example|
+|--------------------------------|-------------|--------|
+| `ALL` | Every job within the bin contributes to the counter. $$ \#\text{jobs}$$||
+| `INITIAL` | Count only jobs present at the start of the bin||
+|`FINAL` | Count only jobs present at the conclusion of the bin||
+|`WEIGHTED AVERAGE`| Find the weighted (by the duration of each job) average of the number of concurrent jobs at any time across the bin. This is equivalent to the hypothetical number of jobs (non-integer) which ran for the full length of the bin, in relation to the duration. $$ \frac{ \sum_i \Delta t_i}{\Delta t_\text{bin}}$$|
 
 |Job Status| Explanation|
 |----------|------------|
@@ -226,6 +247,8 @@ Custom metrics are specified in the `config` file in the `metrics` list as a **J
 >  When getting information about idle jobs, only jobs that are currently idle (`IDLE`) or were removed whilst idle (`IDLE_THEN_REMOVED`) can be used in metrics. When a job leaves its idle state (without being removed. I.e. it ran), time information about its idleness is lost. Thus metrics reporting idle job information require the Daemon to run frequently (to catch currently idle jobs) to be reliable.
 
 
+
+
 --------------------------------------------
 
 ####Examples
@@ -237,24 +260,24 @@ Uses the database `RunningJobs` with a measurement called `num_jobs`, which give
     "database name":           "RunningJobs",
     "measurement name":        "num_jobs",
     "metric type":             "COUNTER",
-    "aggregation operation":   "LAST",
+    "aggregation operation":   "FINAL",
     "group by ClassAd fields": ["Owner", "MATCH_EXP_JOB_SITE"],
-    "job status":              ["RUNNING", "COMPLETED", "RAN THEN REMOVED"],
+    "job statuses":              ["RUNNING OR RAN"],
     "description":             "The number of running jobs (by each owner on each site) at the end of each bin"
 }
 ```
 
-Uses the database `Utilisation` with a measurement called `cpu_time` which gives the CPU time (in each bin) used by each user for all their running and previously run (not currently idle) jobs combined.
+Uses the database `Utilisation` with a measurement called `cpu_time` which gives the CPU time (in each bin) used by each user for all their running and previously run (not currently idle) jobs combined (note that the `job statuses` is entirely equivalent to above).
 
 ```
 {
     "database name":           "Utilisation",
     "measurement name":        "cpu_time",
-    "metric type":             "DIFFERENCE",
+    "metric type":             "CHANGE",
     "value ClassAd field":     "RemoteUserCpu",
     "aggregation operation":   "SUM",
     "group by ClassAd fields": ["Owner"],
-    "job status":              ["RUNNING", "COMPLETED", "RAN_THEN_REMOVED"],
+    "job statuses":            ["RUNNING", "COMPLETED", "RAN_THEN_REMOVED"],
     "description":             "The CPU time used by each owner on each job site per bin"
 }
 ```
@@ -267,7 +290,8 @@ Uses the database `Dormant` with a measurement called `idle_jobs` which gives th
     "metric type":             "COUNTER",
     "aggregation operation":   "SUM",
     "group by ClassAd fields": ["Owner"],
-    "job status":              ["IDLE"],
+    "job statuses":            ["IDLE"],
     "description":             "The CPU time used by each owner on each job site per bin"
 }
 ```
+
