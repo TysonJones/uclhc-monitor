@@ -8,11 +8,9 @@
 #               any (custom formatted) job/classad data into time bins (default, 6 mins) and
 #               pushes these to the front-end (influxDB).
 
-# TODO: if database doesn't exist, create it
+
 # TODO: limit the size of outbox
 # TODO: data retention
-
-import sys; sys.dont_write_bytecode = True
 
 import htcondor
 import urllib2
@@ -202,7 +200,7 @@ def load_last_bin_time():
 def write_last_bin_time(t):
     """writes the time (seconds since epoch) to the last bin time cache"""
     f = open(Filenames.LAST_BIN_TIME, 'w')
-    f.write(t)
+    f.write(str(t))
     f.close()
 
 
@@ -217,6 +215,13 @@ def load_prev_val_cache():
     j = json_load_as_ascii(f)
     f.close()
     return j
+
+
+def write_prev_val_cache(cache):
+    """writes the passed previous value cache to file"""
+    f = open(Filenames.VALUE_CACHE, 'w')
+    json.dump(cache, f)
+    f.close()
 
 
 def load_job_init_vals():
@@ -253,14 +258,17 @@ def add_to_outbox(jobs):
     f.close()
 
 
+'''
 def add_to_log(message):
     """appends a string message to the log"""
     f = open(Filenames.LOG, "a")
     f.write("ERROR at %s:\n%s\n_____________" % (time.ctime(), message))
     f.close()
+'''
 
 
 # debug
+'''
 def spoof_config_metrics():
     conf = {
         ConfigFields.BIN_DURATION: 100,
@@ -312,6 +320,8 @@ def spoof_config_metrics():
     f = open(Filenames.CONFIG, "w")
     json.dump(conf, f, indent=4, sort_keys=False)
     f.close()
+'''
+
 
 
 '''
@@ -486,7 +496,14 @@ def get_relevant_jobs_and_fields_for_metrics(metrics, since_time):
     # jobs are formatted as dicts of required_fields to their condor values
     jobs = []
     if condor_q:
-        jobs += schedd.query(constraint, list(required_fields))
+        ongoing = schedd.query(constraint, list(required_fields))
+
+        # fresh idle jobs don't have LastJobStatus (shouldn't be looked at tho)
+        for job in ongoing:
+            if SpecialClassAds.LAST_JOB_STATUS not in job:
+                job[SpecialClassAds.LAST_JOB_STATUS] = -1
+            jobs.append(job)
+
     if condor_history:
         limit = SpecialClassAds.ENTERED_STATUS_TIME + ' ' + CondorOperators.GREATER_THAN + ' ' + str(since_time)
         constraint = "(%s %s %s)" % (constraint, CondorOperators.AND, limit)
@@ -537,9 +554,8 @@ def get_prev_value_from_cache(jobID, field, init_time, context):
 
     # otherwise, we must assume the previous val as initial at job start
     # if it's not in the init value list, report error and exit
-    print "field", field
-    print "init vals:", context.job_init_vals
-    if field not in context.job_init_vals:
+
+    if field not in context.job_init_vals_dict:
         print ("ERROR! The change in field %s was requested, which requires "+
                "previous value caching. The requested field does NOT appear in "+
                "the initial value cache (%s). Please add it and its initial value! Exiting"
@@ -547,7 +563,7 @@ def get_prev_value_from_cache(jobID, field, init_time, context):
         exit()
 
     # grab the default init value
-    init = context.job_init_vals[field]
+    init = context.job_init_vals_dict[field]
 
     # add it to the previous value cache
     if jobID not in context.prev_value_cache:
@@ -695,7 +711,6 @@ def get_influx_DB_write_string_from_metric_data(metric, metric_vals_at_bins, bin
     returns:
         a string of all metric data formatted to the Influx DB HTTP Push standard.
     """
-
     # vals_at_bins = [  [ (val, groups), (val, groups), ...], ... ] where groups = {'Owner':'trjones',...}
 
     measurement = metric[MetricsFields.MEASUREMENT_NAME]
@@ -748,7 +763,7 @@ def push_metric_data_to_influx_db(db_metrics, domain):
 
     # try to push relevant data to each database, recording failures
     for db_name in db_metrics:
-        url = domain + "write?db=" + db_name
+        url = domain + "write?precision=s&db=" + db_name     # specify timestamps are in second precision
         req = urllib2.Request(url, db_metrics[db_name])
         try:
             urllib2.urlopen(req)
@@ -765,21 +780,23 @@ def push_metric_data_to_influx_db(db_metrics, domain):
                             urllib2.urlopen(req)
                         except:
                             print "Created new database %s but failed to push to it:" % db_name
-                            print db_metrics[db_name]
+                            print db_metrics[db_name][:300] # 300 chars
                             failed[db_name] = db_metrics[db_name]
                     else:
                         print (("Failed to create new database %s at %s. " % (db_name, domain)) +
-                                "The follow data failed to be pushed:\n" + db_metrics[db_name])
+                                "The follow data failed to be pushed:\n" + db_metrics[db_name][0:300]+" ...")
                         failed[db_name] = db_metrics[db_name]
 
                 else:
                     print "We failed (404) trying to push the follow metric data to database %s at %s:" % (db_name, domain)
-                    print db_metrics[db_name]
+                    print db_metrics[db_name][0:300], "..." #300 chars
+
+
                     failed[db_name] = db_metrics[db_name]
             else:
                 print "We failed (%s) trying to push the follow metric data to database %s at %s:" % (
                         str(err.code), db_name, domain)
-                print db_metrics[db_name]
+                print db_metrics[db_name][0:300], "..." # 300 chars
                 failed[db_name] = db_metrics[db_name]
 
     return failed
@@ -789,14 +806,16 @@ class ContextData:
     def __init__(self):
         """Grabs the required contextual data from files (and some calculations)"""
         # load files
-        self.last_bin_time = load_last_bin_time()
+        self.prev_final_bin_time= load_last_bin_time()
+
         self.prev_value_cache   = load_prev_val_cache()
-        self.job_init_vals = load_job_init_vals()
-        config             = load_config()
-        self.bin_duration  = config[ConfigFields.BIN_DURATION]
-        self.database_domain = config[ConfigFields.DATABASE_DOMAIN]
-        self.metrics       = config[ConfigFields.METRICS]
-        self.current_time  = int(time.time())  # may be overwritten by class stripper to ServerTime
+        self.job_init_vals_dict = load_job_init_vals()
+
+        config                  = load_config()
+        self.bin_duration       = config[ConfigFields.BIN_DURATION]
+        self.database_domain    = config[ConfigFields.DATABASE_DOMAIN]
+        self.metrics            = config[ConfigFields.METRICS]
+        self.current_time       = int(time.time())  # may be overwritten by class stripper to ServerTime
 
     def update_current_time_to_server_time(self, jobs):
         """updates the current_time field to use the server time as reported by a job. Not gauranteed to change"""
@@ -808,7 +827,7 @@ class ContextData:
 
 
 # spoofing
-spoof_config_metrics()
+
 spoof_val_cache()
 
 
@@ -818,12 +837,23 @@ spoof_val_cache()
 context = ContextData()
 
 # get needed fields of needed jobs
-jobs = get_relevant_jobs_and_fields_for_metrics(context.metrics, context.last_bin_time)
+jobs = get_relevant_jobs_and_fields_for_metrics(context.metrics, context.prev_final_bin_time)
 context.update_current_time_to_server_time(jobs)
 
+# check that we're not running too early
+if context.current_time < context.prev_final_bin_time + context.bin_duration:
+    print ("ERROR! Daemon has been run too quickly after previous run. " +
+           "Wait for the bin duration %d" % context.bin_duration +
+            "after a previous execution before running")
+    exit()
+
+
 # get the times of each bin (inclusive of start, excludes end time of final bin)
-bin_times = range(context.last_bin_time, context.current_time, context.bin_duration)[:-1]
-DEBUG_PRINT("initial bin time is %d of duration %d" % (context.last_bin_time, context.bin_duration))
+bin_times = range(context.prev_final_bin_time, context.current_time, context.bin_duration)
+DEBUG_PRINT("initial bin time is %d of duration %d" % (context.prev_final_bin_time, context.bin_duration))
+
+# prepare the `final` previous value cache (to overwrite the current at the program's conclusion)
+final_prev_val_cache = {} # {jobID: {field: [val, time], ...}, ...}
 
 "for each metric, work out its value(s) at every time bin"
 
@@ -840,7 +870,6 @@ for metric in context.metrics:
 
     for bin_start in bin_times:
 
-
         vals_for_bin = {}  #{groupscode: {'groups':{'Owner':'trjones', ...}, 'jobs': [jobs, ...]}, ..}
                            #group code is string concat of group vals
                            #each groupscode has a 'groups' dict and a 'jobs' list
@@ -848,10 +877,7 @@ for metric in context.metrics:
 
         "for each bin, look at every job"
 
-
         for job in jobs:
-
-            #TODO: actually irrelevanr jobs should be skipped here!!!
 
             # skip the job if it doesn't satisfy the metrics status requirements
             if not is_job_status_in_metric_statuses(
@@ -873,9 +899,6 @@ for metric in context.metrics:
                 # skip the job if it doesn't contain the required (but not group) fields and report error
                 if val_field not in job:
 
-                    #TODO: this isn't actually an error. Not all jobs match your thing
-                    #TODO: you should have an IF to look only at your specified jobs!!!!!!!!!
-                    #TODO: (which is required for total validity, not just to avoid ins)
 
                     print "ERROR! The following job:\n#####"
                     print job
@@ -884,13 +907,34 @@ for metric in context.metrics:
                     print metric
                     continue
 
-                # TODO: you might also skip with further constraints here
+                # TODO: you might also skip with further constraints here, one day <3
 
                 # get the change in the desired val
                 value, duration = get_change_in_val_over_bin(
                         job, metric[ChangeMetricFields.VALUE_CLASSAD_FIELD],
                         bin_start, bin_start + context.bin_duration,
                         context)
+
+                # TODO: preparing writing out new prev_val cache stuff.
+                # TODO: this is going to be re-run for each metric :/ oh well
+
+                # if the job runs past the end of the final bin in this Daemon run, cache its val at bin end
+                if (bin_start == bin_times[-1] and
+                        (job[SpecialClassAds.JOB_SITE] in JobStatus.ONGOING) or
+                        (job[SpecialClassAds.ENTERED_STATUS_TIME] > bin_start + context.bin_duration)):
+
+                    jobID = job[SpecialClassAds.JOB_ID]
+
+                    # TODO: very hacky calculation of val at end of bin
+                    init_val, init_time = get_prev_value_from_cache(jobID, val_field, None, context)
+                    final_val, final_time = job[val_field], context.current_time
+                    val_at_final_bin_end = (init_val +
+                        (final_val - init_val)/float(final_time - init_time) * (bin_start + context.bin_duration))
+
+                    if jobID not in final_prev_val_cache:
+                        final_prev_val_cache[jobID] = {}
+                    final_prev_val_cache[jobID][val_field] = [val_at_final_bin_end, bin_start + context.bin_duration]
+
 
             if metric_type == MetricsFields.MetricTypes.RAW:
 
@@ -916,11 +960,11 @@ for metric in context.metrics:
 
                 # for the counter type, we might actually skip this job depending on op type
                 if metric_op == CounterMetricFields.AggregationOps.INITIAL:
-                    if start > bin_start:
+                    if (start > bin_start) or (end < bin_start):
                         value = 0
                         # TODO put `continue` here if you don't want 0 val on grafana graph
                 if metric_op == CounterMetricFields.AggregationOps.FINAL:
-                    if end < bin_start + context.bin_duration:
+                    if (end < bin_start + context.bin_duration) or (start > bin_start + context.bin_duration):
                         value = 0
 
 
@@ -1022,32 +1066,42 @@ for metric in context.metrics:
     else:
         metric_data[metric[MetricsFields.DATABASE_NAME]] = metric_string
 
-    DEBUG_PRINT("Metric yielded an influxDB push:\n", metric_string)
+    DEBUG_PRINT("Metric yielded an influxDB push:\n", str(metric_string[:300]) + "...")
 
 
 failed = push_metric_data_to_influx_db(metric_data, context.database_domain)
 
-print "This shit failed to be pushed:"
-print failed
-
-
-# TODO: images to the readme/setup guide!
+print "%d database entries failed to be pushed" % len(failed)
 
 
 
 # TODO: update the outbox
 
 
-# TODO: update the prev_val_cache
+
+# update the prev_val_cache
+DEBUG_PRINT("initial prev value cache:\n", context.prev_value_cache)
+DEBUG_PRINT("final prev value cache:\n", final_prev_val_cache)
+write_prev_val_cache(final_prev_val_cache)
 
 
+# update the prev time
+write_last_bin_time(bin_times[-1] + context.bin_duration)
+DEBUG_PRINT("the current time is %d, but the end of the final bin is %d" % (
+             context.current_time, bin_times[-1] + context.bin_duration), "")
 
 
-# TODO: write out prev_val_cache
-#
+############## TODO: CHECK THE BIN END TIME IS TREATED PROPERLY
+
+# TODO: add doc to wiki
 
 
+# TODO: create missing config files
 
 
+# TODO: time how long the new ASCII JSON loading takes (I think too long)
 
 
+# TODO: (maybe): each Daemon appends a host name tag to all data
+
+# TODO: don't recalculate final bin time everywhere. Clean dat shit up!
