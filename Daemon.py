@@ -46,7 +46,7 @@ class InfluxPatterns:
 class CondorDudValues:
     """the values of Condor fields when Condor reports them incorrectly"""
 
-    JOB_SITE_WHEN_ON_BRICK = ["Unknown", "$$(GLIDEIN_Site:Unknown)", "$$(JOB_Site:unknown)"]
+    JOB_SITE_WHEN_ON_BRICK = ["Unknown", "undefined", "$$(GLIDEIN_Site:Unknown)", "$$(JOB_Site:unknown)"]
 
 
 def DEBUG_PRINT(msg, obj='', suffix=''):
@@ -189,9 +189,19 @@ def convert_to_ascii(data, ignore_dicts = False):
 
 
 def load_last_bin_time():
-    """returns the time (seconds since epoch) of the end of the final bin in the previous push."""
-    f = open(Filenames.LAST_BIN_TIME, 'r')
-    t = f.read()
+    """
+    returns the time (seconds since epoch) of the end of the final bin in the previous push,
+    as read from file. If the file doesn't exist, creates with the current time
+    """
+    try:
+        f = open(Filenames.LAST_BIN_TIME, 'r')
+        t = f.read()
+    except:
+        t = int(time.time())
+        print "The last bin time file (%s) doesn't exist. Creating with current time (%d)." % (
+            Filenames.LAST_BIN_TIME, t)
+        f = open(Filenames.LAST_BIN_TIME, 'w')
+        f.write(str(t))
     f.close()
     return long(t)
 
@@ -205,13 +215,19 @@ def write_last_bin_time(t):
 
 def load_prev_val_cache():
     """
-    loads the cache containing previous job Classad values
+    loads the cache containing previous job Classad values (creates if inexistant or corrupt)
 
     returns:
         {}  -  the cache of values:{GlobalJobId: {field: [val, time], ...}, ... }
     """
-    f = open(Filenames.VALUE_CACHE, 'r')
-    j = json_load_as_ascii(f)
+    try:
+        f = open(Filenames.VALUE_CACHE, 'r')
+        j = json_load_as_ascii(f)
+    except:
+        print "The previous value cache (%s) doesn't exist, or it's JSON is corrupt. Creating empty."
+        f = open(Filenames.VALUE_CACHE, 'w')
+        j = {}
+        json.dump(j, f)
     f.close()
     return j
 
@@ -225,24 +241,87 @@ def write_prev_val_cache(cache):
 
 def load_job_init_vals():
     """returns a dictionary of the initial values of job classad fields set when a job first runs"""
-    f = open(Filenames.INIT_JOB_FIELDS, 'r')
-    j = json_load_as_ascii(f)
+    try:
+        f = open(Filenames.INIT_JOB_FIELDS, 'r')
+        j = json_load_as_ascii(f)
+    except:
+        f = open(Filenames.INIT_JOB_FIELDS, 'w')
+        j = {
+            "RemoteUserCpu": 0,
+            "NumJobStarts":  1}         # default init job fields
+        json.dump(j, f, indent=4)
+        print "The initial job values file (%s) doesn't exist. Creating it, with default contents:\n%s" % (
+            Filenames.INIT_JOB_FIELDS, json.dumps(j, indent=4))
     f.close()
     return j
 
 
 def load_config():
-    """returns a dict of config settings."""
-    f = open(Filenames.CONFIG, 'r')
-    j = json_load_as_ascii(f)
+    """returns a dict of config settings. If doesn't exist, creates new default. If corrupt, errors and exits"""
+    try:
+        f = open(Filenames.CONFIG, 'r')
+        j = json_load_as_ascii(f)
+    except ValueError:
+        error_message = ("ERROR! (terminating...)\n" +
+                        ("The config file (%s) has invalid/corrupt JSON and can not be read. " % Filenames.CONFIG) +
+                         "Please fix, otherwise delete the file and rerun the daemon " +
+                         "(which will create a default config)")
+        print "\n", error_message
+        add_to_error_log(error_message)
+        exit()
+    except IOError:
+        print "The config file (%s) doesn't exist. Creating a new one with default sample contents:" % Filenames.CONFIG
+        f = open(Filenames.CONFIG, 'w')
+        j = {
+            ConfigFields.BIN_DURATION: 60,
+            ConfigFields.OUTBOX_DATA_LIMIT: 1000,
+            ConfigFields.DATABASE_DOMAIN: "http://test-003.t2.ucsd.edu:8086",
+            ConfigFields.METRICS: [
+                {
+                    MetricsFields.DATABASE_NAME: "DefaultDB",
+                    MetricsFields.MEASUREMENT_NAME: "num_jobs",
+                    MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
+                    MetricsFields.GROUP_FIELDS: ["Owner", "SUBMIT_SITE", "MATCH_EXP_JOB_Site"],
+                    MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.ALL,
+                    MetricsFields.JOB_STATUSES: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
+                    MetricsFields.DESCRIPTION: "The number of jobs which have run across owners and sites"
+                }
+            ]
+        }
+        print json.dumps(j, indent=4)
+        json.dump(j, f, indent=4)
     f.close()
     return j
 
 
 def load_outbox():
-    """returns the contents of the outbox."""
-    f = open(Filenames.OUTBOX, 'r')
-    j = json_load_as_ascii(f)
+    """
+    returns the contents of the outbox. If doesn't exist, creates. If corrupt, saves the outbox to a
+    separate file with a timestamp filename suffix, then empties the current corrupt outbox
+    """
+    try:
+        f = open(Filenames.OUTBOX, 'r')
+        j = json_load_as_ascii(f)
+    except IOError:
+        print "The outbox file (%s) doesn't exist. Creating a new empty one." % Filenames.OUTBOX
+        f = open(Filenames.OUTBOX, 'w')
+        j = {}
+        json.dump(j, f, indent=4)
+    except ValueError:
+        save = Filenames.OUTBOX.split('.')[0] + "_CORRUPT_" + str(int(time.ctime()))
+        error_message = ("ERROR! (continuing...)\n" +
+                        ("The outbox file (%s) contains invalid/corrupt JSON. " % Filenames.OUTBOX) +
+                        ("It is being emptied and the corrupt outbox is being saved in %s." % save))
+        print "\n", error_message
+        add_to_error_log(error_message)
+        f = open(Filenames.OUTBOX, 'r')
+        g = open(save, 'w')
+        g.write(f.read())
+        g.close()
+        f.close()
+        f = open(Filenames.OUTBOX, 'w')
+        j = {}
+        json.dump(j, f, indent=4)
     f.close()
     return j
 
@@ -258,66 +337,87 @@ def add_to_outbox(jobs):
 
 
 def add_to_error_log(message):
-    """appends a string message to the log"""
+    """appends a string message to the log (creates error log silently if it doesn't exist)"""
     f = open(Filenames.ERROR_LOG, "a")
     f.write(("------------- %s --------------\n" % time.ctime()) + message)
     f.close()
 
 
 # debug
-'''
 def spoof_config_metrics():
     conf = {
-        ConfigFields.BIN_DURATION: 100,
+        ConfigFields.BIN_DURATION: 60,
         ConfigFields.OUTBOX_DATA_LIMIT: 1000,
         ConfigFields.DATABASE_DOMAIN: "http://test-003.t2.ucsd.edu:8086",
         ConfigFields.METRICS: [
-            # {
-            #     MetricsFields.DATABASE_NAME: "RunningJobs",
-            #     MetricsFields.MEASUREMENT_NAME: "num_jobs",
-            #     MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
-            #     MetricsFields.GROUP_FIELDS: ["Owner"],
-            #     MetricsFields.AGGREGATE_OP: MetricsFields.AggregationOps.LAST,
-            #     MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
-            #     MetricsFields.DESCRIPTION: ("The number of running jobs (by each owner) " +
-            #                                              "at the end of each bin")
-            # },
-            #
-             {
-                 MetricsFields.DATABASE_NAME: "MetricTest",
-                 MetricsFields.MEASUREMENT_NAME: "cpu_time",
-                 MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.CHANGE,
-                 ChangeMetricFields.VALUE_CLASSAD_FIELD: "RemoteUserCpu",
-                 MetricsFields.GROUP_FIELDS: ["Owner", "MATCH_EXP_JOB_Site"],
-                 MetricsFields.AGGREGATE_OP: ChangeMetricFields.AggregationOps.SUM,
-                 MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
-                 MetricsFields.DESCRIPTION: "The CPU time used by each owner on each job site per bin."
-             },
-            # {
-            #     MetricsFields.DATABASE_NAME: "MetricTest",
-            #     MetricsFields.MEASUREMENT_NAME: "num_idle",
-            #     MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
-            #     MetricsFields.GROUP_FIELDS: ["Owner"],
-            #     MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.FINAL,
-            #     MetricsFields.JOB_STATUS: [MetricsFields.JobStatuses.IDLE,
-            #                                MetricsFields.JobStatuses.IDLE_THEN_REMOVED],
-            #     MetricsFields.DESCRIPTION: "Number of idle jobs per user at the end of each time bin, which remain running now"
-            # },
-            # {
-            #     MetricsFields.DATABASE_NAME: "MetricTest",
-            #     MetricsFields.MEASUREMENT_NAME: "num_total_jobs",
-            #     MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
-            #     MetricsFields.GROUP_FIELDS: ["SUBMIT_SITE"],
-            #     MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.ALL,
-            #     MetricsFields.JOB_STATUS: []
-            # }
+
+            {
+                MetricsFields.DATABASE_NAME: "FranksData",
+                MetricsFields.MEASUREMENT_NAME: "num_jobs_submit_and_job_sites",
+                MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
+                MetricsFields.GROUP_FIELDS: ["SUBMIT_SITE", "MATCH_EXP_JOB_Site"],
+                MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.ALL,
+                MetricsFields.JOB_STATUSES: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
+                MetricsFields.DESCRIPTION: "The number of jobs which actually ran, by submit and job sites"
+            },
+
+            {
+                MetricsFields.DATABASE_NAME: "FranksData",
+                MetricsFields.MEASUREMENT_NAME: "num_jobs_owners",
+                MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
+                MetricsFields.GROUP_FIELDS: ["Owner"],
+                MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.ALL,
+                MetricsFields.JOB_STATUSES: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
+                MetricsFields.DESCRIPTION: "The number of jobs which actually ran, by user"
+            },
+
+            {
+                "database name": "MetricTest",
+                "job statuses": [
+                    "RUNNING OR RAN"
+                ],
+                "group by ClassAd fields": [
+                    "Owner",
+                    "MATCH_EXP_JOB_Site"
+                ],
+                "metric type": "CHANGE",
+                "description": "The CPU time used by each owner on each job site per bin.",
+                "aggregation operation": "SUM",
+                "measurement name": "cpu_time",
+                "value ClassAd field": "RemoteUserCpu"
+            },
+            {
+                "database name": "MetricTest",
+                "job statuses": [
+                    "IDLE"
+                ],
+                "metric type": "COUNTER",
+                "description": "The number of idle jobs of each user.",
+                "aggregation operation": "ALL",
+                "group by ClassAd fields": [
+                    "Owner"
+                ],
+                "measurement name": "num_idle"
+            },
+            {
+                "database name": "MetricTest",
+                "job statuses": [
+                    "RUNNING OR RAN"
+                ],
+                "metric type": "COUNTER",
+                "description": "The number of jobs running submitted by each user.",
+                "aggregation operation": "WEIGHTED AVERAGE",
+                "group by ClassAd fields": [
+                    "Owner"
+                ],
+                "measurement name": "num_running"
+            }
         ]
     }
 
     f = open(Filenames.CONFIG, "w")
     json.dump(conf, f, indent=4, sort_keys=False)
     f.close()
-'''
 
 
 
@@ -510,7 +610,7 @@ def get_relevant_jobs_and_fields_for_metrics(metrics, since_time):
     return jobs
 
 
-def spoof_val_cache():
+def spoof_prev_val_cache():
     """for debug. Spoofs previous RemoteUserCPU value in cache"""
     f = open(Filenames.VALUE_CACHE, 'w')
     # {GlobalJobId: { classad field: [val, timestamp], ...}, ... }
@@ -680,7 +780,6 @@ def get_change_in_val_over_bin(job, field, t0, t1, context):
             time_in_bin)
 
     return [val_change_in_bin, time_in_bin]
-
 
 
 def is_job_status_in_metric_statuses(job_status, prev_job_status, metric_statuses):
@@ -889,6 +988,12 @@ class ContextData:
         bin_times = range(self.init_bin_start_time, self.current_time, self.bin_duration)
         self.bin_start_times, self.final_bin_end_time = bin_times[:-1], bin_times[-1]
 
+
+"grabbing cached context"
+
+# debug
+spoof_config_metrics()
+
 # get contextual values
 context = ContextData()
 DEBUG_PRINT(
@@ -1094,7 +1199,7 @@ for metric in context.metrics:
                 for group_job in group_jobs:
                     total_weighted += group_job['value'] * group_job['duration']
                     total_duration += group_job['duration']
-                result = total_weighted / total_duration
+                result = (total_weighted / total_duration) if (total_duration > 0) else 0
                 results_for_bin.append((result, group_groups))
 
         if metric_op == CounterMetricFields.AggregationOps.WEIGHTED_AVERAGE:
@@ -1121,7 +1226,7 @@ for metric in context.metrics:
                 for group_job in group_jobs:
                     total_unweighted += group_job['value']
                     total_jobs += 1
-                result = total_unweighted / total_jobs
+                result = (total_unweighted / total_jobs) if (total_jobs > 0) else 0
                 results_for_bin.append((result, group_groups))
 
         "submit metric info for this bin"
