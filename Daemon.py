@@ -26,7 +26,7 @@ class Filenames:
     CONFIG = "config.json"
     LAST_BIN_TIME = "last_bin_time"
     OUTBOX = "outbox.json"
-    LOG = "log.json"
+    ERROR_LOG = "error_log.txt"
     INIT_JOB_FIELDS = "initial_running_job_vals.json"
     VALUE_CACHE = "prev_value_cache.json"
 
@@ -49,10 +49,10 @@ class CondorDudValues:
     JOB_SITE_WHEN_ON_BRICK = ["Unknown", "$$(GLIDEIN_Site:Unknown)", "$$(JOB_Site:unknown)"]
 
 
-def DEBUG_PRINT(msg, obj=''):
+def DEBUG_PRINT(msg, obj='', suffix=''):
     """prints a debug message and object, only if the debug print flag is true"""
     if PRINT_DEBUGS:
-        print msg, obj
+        print msg, obj, suffix
 
 
 class CondorOperators:
@@ -106,7 +106,6 @@ class JobStatus:
     DONE    = [REMOVED, COMPLETED]
 
 
-# TODO: overhaul aggregation ops vs type. Some should be type specific?
 class ConfigFields:
     """labels of the fields in the configuration file"""
     BIN_DURATION = "bin duration"
@@ -122,7 +121,7 @@ class MetricsFields:
     MEASUREMENT_NAME = "measurement name"
     GROUP_FIELDS = "group by ClassAd fields"
 
-    JOB_STATUS = "job statuses"
+    JOB_STATUSES = "job statuses"
     class JobStatuses:
         """labels of the possible statuses of a job, which may be filtered out of a metric's gaze"""
         IDLE = "IDLE"
@@ -258,13 +257,11 @@ def add_to_outbox(jobs):
     f.close()
 
 
-'''
-def add_to_log(message):
+def add_to_error_log(message):
     """appends a string message to the log"""
-    f = open(Filenames.LOG, "a")
-    f.write("ERROR at %s:\n%s\n_____________" % (time.ctime(), message))
+    f = open(Filenames.ERROR_LOG, "a")
+    f.write(("------------- %s --------------\n" % time.ctime()) + message)
     f.close()
-'''
 
 
 # debug
@@ -417,7 +414,7 @@ def get_relevant_jobs_and_fields_for_metrics(metrics, since_time):
     required_fields = set().union(SpecialClassAds.REQUIRED)
     for metric in metrics:
         # mark that a JobStatus is needed
-        for status in metric[MetricsFields.JOB_STATUS]:
+        for status in metric[MetricsFields.JOB_STATUSES]:
             required_status[status] = True
 
         # mark that a ClassAd field is needed (groups and main val)
@@ -554,16 +551,19 @@ def get_prev_value_from_cache(jobID, field, init_time, context):
 
     # otherwise, we must assume the previous val as initial at job start
     # if it's not in the init value list, report error and exit
-
-    if field not in context.job_init_vals_dict:
-        print ("ERROR! The change in field %s was requested, which requires "+
-               "previous value caching. The requested field does NOT appear in "+
-               "the initial value cache (%s). Please add it and its initial value! Exiting"
-               ) % (field, Filenames.INIT_JOB_FIELDS)
+    if field not in context.init_job_vals_dict:
+        error_message = (
+            "ERROR! (terminaing...)\n" +
+            "The CHANGE in field " +field + " of job " + jobID + "was requested, " +
+            "though a previous value has not been cached. The default initial value of this field for a new job " +
+            "was sought in the initial job values dictionary (" + Filenames.INIT_JOB_FIELDS + "), but was not found. " +
+            "Please add it!")
+        print "\n", error_message
+        add_to_error_log(error_message)
         exit()
 
     # grab the default init value
-    init = context.job_init_vals_dict[field]
+    init = context.init_job_vals_dict[field]
 
     # add it to the previous value cache
     if jobID not in context.prev_value_cache:
@@ -617,6 +617,40 @@ def get_duration_of_job_within_bin(job, t0, t1):
     return (time_in_bin, start, end)
 
 
+def linear_interpolate_value_at_time(t0, v0, t1, v1, t):
+    """
+    linearly interpolates a changing value to find it at a particular time within the passed time window
+
+    arguments:
+        t0    --    time of the first known value v0
+        v0    --    the first known value
+        t1    --    time of the second known value (t1 > t0)
+        v1    --    the second known value (can be above, below or equal v0)
+        t     --    the time at which to find the value
+
+    returns:
+        float  --   the value at t
+    """
+    return v0 + linear_interpolate_value_change(t0, v0, t1, v1, t - t0)
+
+
+def linear_interpolate_value_change(t0, v0, t1, v1, dt):
+    """
+    calculates the change of a value over a time window by assuming a constant rate of change between supplied values.
+
+    arguments:
+        t0    --    time of the first known value v0
+        v0    --    the first known value
+        t1    --    time of the second known value (t1 > t0)
+        v1    --    the second known value (can be above, below or equal v0)
+        dt    --    the duration across which to find the value change
+
+    returns:
+        float  --   the value at t
+    """
+    return (v1 - v0)/float(t1-t0) * dt
+
+
 def get_change_in_val_over_bin(job, field, t0, t1, context):
     """
     calculates the change in a job field over/within the bin [t0, t1]. Does this by consulting
@@ -634,16 +668,16 @@ def get_change_in_val_over_bin(job, field, t0, t1, context):
         [float, int] -- the change in value of the field over the bin (or within), and its duration in bin.
                         The duration of the job is less than or equal to t1 - t0.
     """
-    time_in_bin, start, end = get_duration_of_job_within_bin(job, t0, t1)
+    # the duration for which the job is active within the bin (<= bin duration), and the jobs global start time
+    time_in_bin, start, _ = get_duration_of_job_within_bin(job, t0, t1)
 
-    # the prev val of the field and that time the job had it
+    # the prev val of the field and the time the job had this value
     prev_val, prev_time = get_prev_value_from_cache(job[SpecialClassAds.JOB_ID], field, start, context)
 
-    # change in val per unit time, incurred since prev
-    val_change_rate = (job[field] - prev_val)/float(context.current_time - prev_time)
-
-    # change in val over bin
-    val_change_in_bin = time_in_bin * val_change_rate
+    val_change_in_bin = linear_interpolate_value_change(
+            prev_time, prev_val,
+            context.current_time, job[field],
+            time_in_bin)
 
     return [val_change_in_bin, time_in_bin]
 
@@ -804,137 +838,172 @@ def push_metric_data_to_influx_db(db_metrics, domain):
 
 class ContextData:
     def __init__(self):
-        """Grabs the required contextual data from files (and some calculations)"""
+        """
+        Grabs the required contextual data from files (and some calculations).
+        Note that the current time and the end time of the final bin use python's clock as a placeholder. When
+        a job is encountered with the ServerTime classad, that server time is used instead and the vals recalculcated.
+        """
         # load files
-        self.prev_final_bin_time= load_last_bin_time()
-
+        self.init_bin_start_time = load_last_bin_time()
         self.prev_value_cache   = load_prev_val_cache()
-        self.job_init_vals_dict = load_job_init_vals()
+        self.init_job_vals_dict = load_job_init_vals()
 
         config                  = load_config()
-        self.bin_duration       = config[ConfigFields.BIN_DURATION]
         self.database_domain    = config[ConfigFields.DATABASE_DOMAIN]
         self.metrics            = config[ConfigFields.METRICS]
-        self.current_time       = int(time.time())  # may be overwritten by class stripper to ServerTime
+        self.bin_duration       = config[ConfigFields.BIN_DURATION]
+
+        "to be overwritten when server time is found in a job"
+        self.current_time       = int(time.time())
+        self.bin_start_times    = None     # updated below
+        self.final_bin_end_time = None     # updated below
+        self.update_bin_times()            # updates
 
     def update_current_time_to_server_time(self, jobs):
-        """updates the current_time field to use the server time as reported by a job. Not gauranteed to change"""
+        """updates the current_time field (and derivs) to use the server time as reported by a job. Might not change"""
         for job in jobs:
             if SpecialClassAds.SERVER_TIME in job:
                 self.current_time = job[SpecialClassAds.SERVER_TIME]
+                self.update_bin_times()
                 break
 
+    def update_bin_times(self):
+        """
+        Updates the bin_start_times and final_bin_end_times fields.
+        Also checks if the daemon should even be running yet
+        """
+        # error and exit if the daemon is running too early
+        init_bin_end_time = self.init_bin_start_time + self.bin_duration
+        if self.current_time < init_bin_end_time:
+            error_message = ("ERROR! (terminating...)\n" +
+                             "Daemon has been run too quickly after previous run (first bin hasn't expired yet).\n" +
+                            ("End of previous bin: %d, bin duration: %d, current time: %d (must be later than %d)." % (
+                                 self.init_bin_start_time, self.bin_duration, self.current_time, init_bin_end_time)) +
+                             "Please ensure that the time between daemon executions is larger than the duration of " +
+                             "each bin.")
+            print "\n", error_message
+            add_to_error_log(error_message)
+            exit()
 
-
-# spoofing
-
-spoof_val_cache()
-
-
-
+        # calculate bin times
+        bin_times = range(self.init_bin_start_time, self.current_time, self.bin_duration)
+        self.bin_start_times, self.final_bin_end_time = bin_times[:-1], bin_times[-1]
 
 # get contextual values
 context = ContextData()
+DEBUG_PRINT(
+        "Using the Python clock:\n" +
+        "Initial bin start: %d, Final bin end: %d (%d bins of duration %d), Current time: %d" % (
+        context.init_bin_start_time,
+        context.final_bin_end_time,
+        len(context.bin_start_times),
+        context.bin_duration,
+        context.current_time),
+        "", "\n")
 
-# get needed fields of needed jobs
-jobs = get_relevant_jobs_and_fields_for_metrics(context.metrics, context.prev_final_bin_time)
+# get needed fields of needed jobs (and update clock specific info; daemon exists here if running too early)
+jobs = get_relevant_jobs_and_fields_for_metrics(context.metrics, context.init_bin_start_time)
 context.update_current_time_to_server_time(jobs)
-
-# check that we're not running too early
-if context.current_time < context.prev_final_bin_time + context.bin_duration:
-    print ("ERROR! Daemon has been run too quickly after previous run. " +
-           "Wait for the bin duration %d" % context.bin_duration +
-            "after a previous execution before running")
-    exit()
-
-
-# get the times of each bin (inclusive of start, excludes end time of final bin)
-bin_times = range(context.prev_final_bin_time, context.current_time, context.bin_duration)
-DEBUG_PRINT("initial bin time is %d of duration %d" % (context.prev_final_bin_time, context.bin_duration))
+DEBUG_PRINT(
+        "Adjusted time vars using a running job's ServerTime ad:\n" +
+        "Initial bin start: %d, Final bin end: %d (%d bins of duration %d), Current time: %d" % (
+        context.init_bin_start_time,
+        context.final_bin_end_time,
+        len(context.bin_start_times),
+        context.bin_duration,
+        context.current_time),
+        "", "\n")
 
 # prepare the `final` previous value cache (to overwrite the current at the program's conclusion)
 final_prev_val_cache = {} # {jobID: {field: [val, time], ...}, ...}
 
-"for each metric, work out its value(s) at every time bin"
-
+# stores growing influx DB HTTP raw push content. updated after calculation for each metric.
 metric_data = {}   # { Database name: string (grows), ... }
 
+"iterate metrics"
+
+# for each metric, work out its value(s) at every time bin, using every job
 for metric in context.metrics:
 
-    vals_at_bins = [] #     [ [separated by dif tags, ..], ...]
+    # an array of metric values at each bin, indexed in parallel to context.bin_start_times.
+    # each array value is actually an array of tuples, each corresponding to different group tagged data for that bin
+    vals_at_bins = [] #     [ [ (val, {group info}), ...], ...]
 
     metric_type = metric[MetricsFields.METRIC_TYPE]
     metric_op   = metric[MetricsFields.AGGREGATE_OP]
 
-    DEBUG_PRINT("processing metric: ", metric)
+    DEBUG_PRINT("Processing metric:\n", json.dumps(metric, indent=4), '\n')
 
-    for bin_start in bin_times:
+    "iterate bins"
+
+    for bin_start in context.bin_start_times:
+
+        bin_end = bin_start + context.bin_duration
 
         vals_for_bin = {}  #{groupscode: {'groups':{'Owner':'trjones', ...}, 'jobs': [jobs, ...]}, ..}
                            #group code is string concat of group vals
                            #each groupscode has a 'groups' dict and a 'jobs' list
                            #each job is {'value': val, 'duration': dur}
 
-        "for each bin, look at every job"
+        "iterate jobs"
 
+        # for each bin, look at every job
         for job in jobs:
 
             # skip the job if it doesn't satisfy the metrics status requirements
             if not is_job_status_in_metric_statuses(
                     job[SpecialClassAds.JOB_STATUS],
                     job[SpecialClassAds.LAST_JOB_STATUS],
-                    metric[MetricsFields.JOB_STATUS]):
+                    metric[MetricsFields.JOB_STATUSES]):
                 continue
 
-
-            "process different metric types; each must yield a value and duration variable"
-
+            # each job yields a value and duration for the bin, the former decided by the metric type
             value, duration = None, None
+
+            "calculating the job value for CHANGE metrics"
 
             if metric_type == MetricsFields.MetricTypes.CHANGE:
 
                 # condor field of the value we want to find the change in
                 val_field = metric[ChangeMetricFields.VALUE_CLASSAD_FIELD]
 
-                # skip the job if it doesn't contain the required (but not group) fields and report error
+                # if the job doesn't contain the required field, error ad exit!
                 if val_field not in job:
-
-
-                    print "ERROR! The following job:\n#####"
-                    print job
-                    print ("#####\ndid not contain the field %s as required by the following metric:" %
-                            metric[ChangeMetricFields.VALUE_CLASSAD_FIELD])
-                    print metric
-                    continue
-
-                # TODO: you might also skip with further constraints here, one day <3
+                    error_message = ("ERROR! (terminating...)\n" +
+                                     "A job utilised by a metric (of type CHANGE) does not contain the " +
+                                     "required field `" + val_field + "`.\n" +
+                                     "job:\n" + json.dumps(job, indent=4) + "\n" +
+                                     "metric:\n" + json.dumps(metric, indent=4))
+                    print "\n", error_message
+                    add_to_error_log(error_message)
+                    exit()
 
                 # get the change in the desired val
                 value, duration = get_change_in_val_over_bin(
                         job, metric[ChangeMetricFields.VALUE_CLASSAD_FIELD],
-                        bin_start, bin_start + context.bin_duration,
+                        bin_start, bin_end,
                         context)
 
-                # TODO: preparing writing out new prev_val cache stuff.
-                # TODO: this is going to be re-run for each metric :/ oh well
-
                 # if the job runs past the end of the final bin in this Daemon run, cache its val at bin end
-                if (bin_start == bin_times[-1] and
+                if (bin_end == context.final_bin_end_time and
                         (job[SpecialClassAds.JOB_SITE] in JobStatus.ONGOING) or
-                        (job[SpecialClassAds.ENTERED_STATUS_TIME] > bin_start + context.bin_duration)):
+                        (job[SpecialClassAds.ENTERED_STATUS_TIME] > bin_end)):
 
                     jobID = job[SpecialClassAds.JOB_ID]
 
-                    # TODO: very hacky calculation of val at end of bin
+                    # calculate the job value at the end of this bin time (<= current time), for caching
                     init_val, init_time = get_prev_value_from_cache(jobID, val_field, None, context)
-                    final_val, final_time = job[val_field], context.current_time
-                    val_at_final_bin_end = (init_val +
-                        (final_val - init_val)/float(final_time - init_time) * (bin_start + context.bin_duration))
+                    val_at_final_bin_end = linear_interpolate_value_at_time(
+                            init_time, init_val,
+                            context.current_time, job[val_field],
+                            context.final_bin_end_time)
 
+                    # cache it (job might already be in cache for other vals)
                     if jobID not in final_prev_val_cache:
                         final_prev_val_cache[jobID] = {}
-                    final_prev_val_cache[jobID][val_field] = [val_at_final_bin_end, bin_start + context.bin_duration]
+                    final_prev_val_cache[jobID][val_field] = [val_at_final_bin_end, context.final_bin_end_time]
 
+            "calculating the job value for RAW metrics"
 
             if metric_type == MetricsFields.MetricTypes.RAW:
 
@@ -943,30 +1012,34 @@ for metric in context.metrics:
 
                 # skip the job if it doesn't contain the required (but not group) fields and report error
                 if val_field not in job:
-                    print "ERROR! The following job:\n#####"
-                    print job
-                    print ("#####\ndid not contain the field %s as required by the following metric:" %
-                            metric[ChangeMetricFields.VALUE_CLASSAD_FIELD])
-                    print metric
-                    continue
+                    error_message = ("ERROR! (terminating...)\n" +
+                                     "A job utilised by a metric (of type RAW) does not contain the " +
+                                     "required field `" + val_field + "`.\n" +
+                                     "job:\n" + json.dumps(job, indent=4) + "\n" +
+                                     "metric:\n" + json.dumps(metric, indent=4))
+                    print "\n", error_message
+                    add_to_error_log(error_message)
+                    exit()
 
                 value = job[val_field]
-                duration = get_duration_of_job_within_bin(job, bin_start, bin_start + context.bin_duration)[0]
+                duration = get_duration_of_job_within_bin(job, bin_start, bin_end)[0]
+
+            "calculating the job value for COUNTER metrics"
 
             if metric_type == MetricsFields.MetricTypes.COUNTER:
 
-                duration, start, end = get_duration_of_job_within_bin(job, bin_start, bin_start + context.bin_duration)
+                duration, start, end = get_duration_of_job_within_bin(job, bin_start, bin_end)
                 value = 1 if (duration > 0) else 0
 
                 # for the counter type, we might actually skip this job depending on op type
                 if metric_op == CounterMetricFields.AggregationOps.INITIAL:
                     if (start > bin_start) or (end < bin_start):
                         value = 0
-                        # TODO put `continue` here if you don't want 0 val on grafana graph
                 if metric_op == CounterMetricFields.AggregationOps.FINAL:
-                    if (end < bin_start + context.bin_duration) or (start > bin_start + context.bin_duration):
+                    if (end < bin_end) or (start > bin_end):
                         value = 0
 
+            "grouping the job value by fields"
 
             # associate the job value with the metric's specified grouping
             job_val = {'value':value, 'duration':duration}
@@ -979,7 +1052,7 @@ for metric in context.metrics:
                         if job[group] in CondorDudValues.JOB_SITE_WHEN_ON_BRICK:
                             groups[group] = job[SpecialClassAds.SUBMIT_SITE]
                 else:
-                    groups[group] = Labels.METRIC_GROUP_UNKNOWN_VALUE
+                    groups[group] = Labels.METRIC_GROUP_UNKNOWN_VALUE       # TODO: report this?
             group_code = ','.join([str(groups[key]) for key in groups])
 
             if group_code in vals_for_bin:
@@ -987,9 +1060,8 @@ for metric in context.metrics:
             else:
                 vals_for_bin[group_code] = {'jobs':[job_val], 'groups':groups}
 
+        "aggregating jobs data for this bin"
 
-
-        "collate job data for this time bin"
         # vals_for_bin =   {groupscode: {'groups':{'Owner':'trjones', ...}, 'jobs': [jobs, ...]}, ..}
                            #group code is string concat of group vals
                            #each groupscode has a 'groups' dict and a 'jobs' list
@@ -1052,22 +1124,22 @@ for metric in context.metrics:
                 result = total_unweighted / total_jobs
                 results_for_bin.append((result, group_groups))
 
+        "submit metric info for this bin"
 
-        "submit metrics for this bin"
         vals_at_bins.append(results_for_bin)
 
+    "submit all bin info for this metric"
 
-    "submit all info for this metric"
     # vals_at_bins = [  [ (val, groups), (val, groups), ...], ... ] where groups = {'Owner':'trjones',...}
 
-    metric_string = get_influx_DB_write_string_from_metric_data(metric, vals_at_bins, bin_times)
+    metric_string = get_influx_DB_write_string_from_metric_data(metric, vals_at_bins, context.bin_start_times)
     if metric[MetricsFields.DATABASE_NAME] in metric_data:
         metric_data[metric[MetricsFields.DATABASE_NAME]] += "\n" + metric_string
     else:
         metric_data[metric[MetricsFields.DATABASE_NAME]] = metric_string
+    DEBUG_PRINT("Metric yielded an influxDB push:\n", str(metric_string[:300]) + "...\n")
 
-    DEBUG_PRINT("Metric yielded an influxDB push:\n", str(metric_string[:300]) + "...")
-
+"submit all metric info to influx db"
 
 failed = push_metric_data_to_influx_db(metric_data, context.database_domain)
 
@@ -1075,23 +1147,17 @@ print "%d database entries failed to be pushed" % len(failed)
 
 
 
+
+
+"manage local caches"
+
 # TODO: update the outbox
 
-
-
-# update the prev_val_cache
-DEBUG_PRINT("initial prev value cache:\n", context.prev_value_cache)
-DEBUG_PRINT("final prev value cache:\n", final_prev_val_cache)
+# update the previous value cache (write to file)
 write_prev_val_cache(final_prev_val_cache)
 
-
-# update the prev time
-write_last_bin_time(bin_times[-1] + context.bin_duration)
-DEBUG_PRINT("the current time is %d, but the end of the final bin is %d" % (
-             context.current_time, bin_times[-1] + context.bin_duration), "")
-
-
-############## TODO: CHECK THE BIN END TIME IS TREATED PROPERLY
+# update the previous final bin time end (write to file)
+write_last_bin_time(context.final_bin_end_time)
 
 # TODO: add doc to wiki
 
@@ -1103,5 +1169,3 @@ DEBUG_PRINT("the current time is %d, but the end of the final bin is %d" % (
 
 
 # TODO: (maybe): each Daemon appends a host name tag to all data
-
-# TODO: don't recalculate final bin time everywhere. Clean dat shit up!
