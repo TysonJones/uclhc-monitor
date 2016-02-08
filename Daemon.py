@@ -35,7 +35,7 @@ class Labels:
     """the placeholder or defaulted strings to display to the user"""
 
     # the placeholder for a metric group val to use as an influxDB tag, if a job didn't have a value
-    METRIC_GROUP_UNKNOWN_VALUE = "unknown"
+    METRIC_GROUP_UNKNOWN_VALUE = "(invalid group field)"
 
 
 class InfluxPatterns:
@@ -69,9 +69,9 @@ class CondorOperators:
 
 class SpecialClassAds:
     """
-    the condor labels of important job classad fields. These are needed by the
+    the condor labels of important job classad fields. Some are needed by the
     daemon even if not explicitly mentioned in the user defined custom metrics.
-    Jobs may not have all these fields, but they are attempted collection.
+    Others may be fields which if required, require remedying
     """
     #TYPE = "MyType" # = "Job"
     JOB_ID = "GlobalJobId"
@@ -81,8 +81,11 @@ class SpecialClassAds:
     SERVER_TIME = "ServerTime"
     ENTERED_STATUS_TIME = "EnteredCurrentStatus"
     ENQUEUE_TIME = "QDate"
+
+    # fields that require remedying
     JOB_SITE = "MATCH_EXP_JOB_Site"
     SUBMIT_SITE = "SUBMIT_SITE"
+    WALL_TIME = "RemoteWallClockTime"
 
     #TODO: the Glide_In_Job_Site field must default to submit for local jobs
 
@@ -188,6 +191,13 @@ def convert_to_ascii(data, ignore_dicts = False):
     return data
 
 
+def stringify(obj):
+    try:
+        return json.dumps(obj, indent=4)
+    except:
+        return str(obj)
+
+
 def load_last_bin_time():
     """
     returns the time (seconds since epoch) of the end of the final bin in the previous push,
@@ -224,7 +234,9 @@ def load_prev_val_cache():
         f = open(Filenames.VALUE_CACHE, 'r')
         j = json_load_as_ascii(f)
     except:
-        print "The previous value cache (%s) doesn't exist, or it's JSON is corrupt. Creating empty."
+        print "The previous value cache (%s) doesn't exist, or its JSON is corrupt. Creating empty." % (
+            Filenames.VALUE_CACHE
+        )
         f = open(Filenames.VALUE_CACHE, 'w')
         j = {}
         json.dump(j, f)
@@ -248,10 +260,11 @@ def load_job_init_vals():
         f = open(Filenames.INIT_JOB_FIELDS, 'w')
         j = {
             "RemoteUserCpu": 0,
-            "NumJobStarts":  1}         # default init job fields
+            "NumJobStarts":  1,
+            "RemoteWallClockTime": 0}         # default init job fields
         json.dump(j, f, indent=4)
         print "The initial job values file (%s) doesn't exist. Creating it, with default contents:\n%s" % (
-            Filenames.INIT_JOB_FIELDS, json.dumps(j, indent=4))
+            Filenames.INIT_JOB_FIELDS, stringify(j))
     f.close()
     return j
 
@@ -281,14 +294,14 @@ def load_config():
                     MetricsFields.DATABASE_NAME: "DefaultDB",
                     MetricsFields.MEASUREMENT_NAME: "num_jobs",
                     MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
-                    MetricsFields.GROUP_FIELDS: ["Owner", "SUBMIT_SITE", "MATCH_EXP_JOB_Site"],
+                    MetricsFields.GROUP_FIELDS: ["User", "SUBMIT_SITE", "MATCH_EXP_JOB_Site"],
                     MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.ALL,
                     MetricsFields.JOB_STATUSES: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
                     MetricsFields.DESCRIPTION: "The number of jobs which have run across owners and sites"
                 }
             ]
         }
-        print json.dumps(j, indent=4)
+        print stringify(j)
         json.dump(j, f, indent=4)
     f.close()
     return j
@@ -352,6 +365,28 @@ def spoof_config_metrics():
         ConfigFields.METRICS: [
 
             {
+                MetricsFields.DATABASE_NAME: "Fresh",
+                MetricsFields.MEASUREMENT_NAME: "total_cpu",
+                MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.RAW,
+                MetricsFields.GROUP_FIELDS: ["Owner", "SUBMIT_SITE", "MATCH_EXP_JOB_Site"],
+                MetricsFields.AGGREGATE_OP: RawMetricFields.AggregationOps.SUM,
+                MetricsFields.JOB_STATUSES: ["RUNNING OR RAN"],
+                MetricsFields.DESCRIPTION: "The total CPU (not change) summed of jobs, user and site specific",
+                RawMetricFields.VALUE_CLASSAD_FIELD: "RemoteUserCpu"
+            },
+
+            {
+                MetricsFields.DATABASE_NAME: "Fresh",
+                MetricsFields.MEASUREMENT_NAME: "total_wall",
+                MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.RAW,
+                MetricsFields.GROUP_FIELDS: ["Owner", "SUBMIT_SITE", "MATCH_EXP_JOB_Site"],
+                MetricsFields.AGGREGATE_OP: RawMetricFields.AggregationOps.SUM,
+                MetricsFields.JOB_STATUSES: ["RUNNING OR RAN"],
+                MetricsFields.DESCRIPTION: "The total wall time (not change) summed of jobs, user and site specific",
+                RawMetricFields.VALUE_CLASSAD_FIELD: SpecialClassAds.WALL_TIME
+            },
+
+            {
                 MetricsFields.DATABASE_NAME: "FranksData",
                 MetricsFields.MEASUREMENT_NAME: "num_jobs_submit_and_job_sites",
                 MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
@@ -365,7 +400,7 @@ def spoof_config_metrics():
                 MetricsFields.DATABASE_NAME: "FranksData",
                 MetricsFields.MEASUREMENT_NAME: "num_jobs_owners",
                 MetricsFields.METRIC_TYPE: MetricsFields.MetricTypes.COUNTER,
-                MetricsFields.GROUP_FIELDS: ["Owner"],
+                MetricsFields.GROUP_FIELDS: ["User"],
                 MetricsFields.AGGREGATE_OP: CounterMetricFields.AggregationOps.ALL,
                 MetricsFields.JOB_STATUSES: [MetricsFields.JobStatuses.RUNNING_OR_RAN],
                 MetricsFields.DESCRIPTION: "The number of jobs which actually ran, by user"
@@ -377,7 +412,22 @@ def spoof_config_metrics():
                     "RUNNING OR RAN"
                 ],
                 "group by ClassAd fields": [
-                    "Owner",
+                    "User"
+                ],
+                "metric type": "CHANGE",
+                "description": "The wall time used by each owner per bin.",
+                "aggregation operation": "SUM",
+                "measurement name": "wall_time",
+                "value ClassAd field": SpecialClassAds.WALL_TIME
+            },
+
+            {
+                "database name": "MetricTest",
+                "job statuses": [
+                    "RUNNING OR RAN"
+                ],
+                "group by ClassAd fields": [
+                    "User",
                     "MATCH_EXP_JOB_Site"
                 ],
                 "metric type": "CHANGE",
@@ -395,7 +445,7 @@ def spoof_config_metrics():
                 "description": "The number of idle jobs of each user.",
                 "aggregation operation": "ALL",
                 "group by ClassAd fields": [
-                    "Owner"
+                    "User"
                 ],
                 "measurement name": "num_idle"
             },
@@ -408,7 +458,7 @@ def spoof_config_metrics():
                 "description": "The number of jobs running submitted by each user.",
                 "aggregation operation": "WEIGHTED AVERAGE",
                 "group by ClassAd fields": [
-                    "Owner"
+                    "User"
                 ],
                 "measurement name": "num_running"
             }
@@ -595,10 +645,14 @@ def get_relevant_jobs_and_fields_for_metrics(metrics, since_time):
     if condor_q:
         ongoing = schedd.query(constraint, list(required_fields))
 
-        # fresh idle jobs don't have LastJobStatus (shouldn't be looked at tho)
+        # iterate the ongoing jobs (we need to remedy some fields)
         for job in ongoing:
+
+            # fresh idle jobs don't have LastJobStatus (shouldn't be looked at tho)
             if SpecialClassAds.LAST_JOB_STATUS not in job:
                 job[SpecialClassAds.LAST_JOB_STATUS] = -1
+            if (SpecialClassAds.WALL_TIME in job) and (job[SpecialClassAds.JOB_STATUS] == JobStatus.RUNNING): # walltime 0
+                job[SpecialClassAds.WALL_TIME] = job[SpecialClassAds.SERVER_TIME] - job[SpecialClassAds.JOB_START_DATE]
             jobs.append(job)
 
     if condor_history:
@@ -688,7 +742,6 @@ def get_duration_of_job_within_bin(job, t0, t1):
                         -- the start time of the job
                         -- the end time of the job (t1 if still running)
     """
-
     # start and end of the jobs current state (end defaults to t1 if longer)
     start, end = None, None
 
@@ -712,7 +765,8 @@ def get_duration_of_job_within_bin(job, t0, t1):
         return [0, start, end]
 
     # the time for which the job runs within the bin
-    time_in_bin = min(end, t1) - max(t0, start)
+    time_in_bin = max(0, min(end, t1) - max(t0, start))
+
 
     return (time_in_bin, start, end)
 
@@ -778,6 +832,22 @@ def get_change_in_val_over_bin(job, field, t0, t1, context):
             prev_time, prev_val,
             context.current_time, job[field],
             time_in_bin)
+
+    # TODO: DEBUG ###################################################################################################################################################################################################
+    if (val_change_in_bin < 0):
+        print "STOP THE PRESSES! VAL CHANGE IN BIN IS NEGATIVE!"
+        print val_change_in_bin
+        print "job", stringify(job)
+        print "field", field
+        print "bin start", t0
+        print "bin end", t1
+        print "time in bend", time_in_bin
+        print "job start", start
+        print "prev time", prev_time
+        print "prev val", prev_val
+        print "current time", context.current_time
+        exit()
+
 
     return [val_change_in_bin, time_in_bin]
 
@@ -845,7 +915,6 @@ def get_influx_DB_write_string_from_metric_data(metric, metric_vals_at_bins, bin
         a string of all metric data formatted to the Influx DB HTTP Push standard.
     """
     # vals_at_bins = [  [ (val, groups), (val, groups), ...], ... ] where groups = {'Owner':'trjones',...}
-
     measurement = metric[MetricsFields.MEASUREMENT_NAME]
     metric_string = ""
     for i in range(len(metric_vals_at_bins)):
@@ -978,7 +1047,7 @@ class ContextData:
                              "Daemon has been run too quickly after previous run (first bin hasn't expired yet).\n" +
                             ("End of previous bin: %d, bin duration: %d, current time: %d (must be later than %d)." % (
                                  self.init_bin_start_time, self.bin_duration, self.current_time, init_bin_end_time)) +
-                             "Please ensure that the time between daemon executions is larger than the duration of " +
+                             " Please ensure that the time between daemon executions is larger than the duration of " +
                              "each bin.")
             print "\n", error_message
             add_to_error_log(error_message)
@@ -987,6 +1056,10 @@ class ContextData:
         # calculate bin times
         bin_times = range(self.init_bin_start_time, self.current_time, self.bin_duration)
         self.bin_start_times, self.final_bin_end_time = bin_times[:-1], bin_times[-1]
+
+
+#TODO: push outbox
+outbox = load_outbox()
 
 
 "grabbing cached context"
@@ -1037,7 +1110,7 @@ for metric in context.metrics:
     metric_type = metric[MetricsFields.METRIC_TYPE]
     metric_op   = metric[MetricsFields.AGGREGATE_OP]
 
-    DEBUG_PRINT("Processing metric:\n", json.dumps(metric, indent=4), '\n')
+    DEBUG_PRINT("Processing metric:\n", stringify(metric), '\n')
 
     "iterate bins"
 
@@ -1077,8 +1150,8 @@ for metric in context.metrics:
                     error_message = ("ERROR! (terminating...)\n" +
                                      "A job utilised by a metric (of type CHANGE) does not contain the " +
                                      "required field `" + val_field + "`.\n" +
-                                     "job:\n" + json.dumps(job, indent=4) + "\n" +
-                                     "metric:\n" + json.dumps(metric, indent=4))
+                                     "job:\n" + stringify(job) + "\n" +
+                                     "metric:\n" + stringify(metric))
                     print "\n", error_message
                     add_to_error_log(error_message)
                     exit()
@@ -1120,8 +1193,8 @@ for metric in context.metrics:
                     error_message = ("ERROR! (terminating...)\n" +
                                      "A job utilised by a metric (of type RAW) does not contain the " +
                                      "required field `" + val_field + "`.\n" +
-                                     "job:\n" + json.dumps(job, indent=4) + "\n" +
-                                     "metric:\n" + json.dumps(metric, indent=4))
+                                     "job:\n" + stringify(job) + "\n" +
+                                     "metric:\n" + stringify(metric))
                     print "\n", error_message
                     add_to_error_log(error_message)
                     exit()
